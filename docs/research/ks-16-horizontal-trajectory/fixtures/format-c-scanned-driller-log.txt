@@ -1,0 +1,70 @@
+KS-16 fixture — Format C: scanned historical document, OCR-territory.
+
+Provenance: real, public KGS-hosted scan, fetched directly 2026-09-05
+during KS-16 research. This is a genuine image scan (aged, foxed paper,
+typewriter font, hole-punch marks, water damage visible on the original)
+— the transcription below was produced by this session's own multimodal
+vision reading of the scanned image, NOT a general-purpose automated OCR
+pipeline, and is reproduced here specifically to illustrate the format,
+not as a claim that any OCR tool would reproduce it this cleanly.
+
+Source well: "Gally" Farm, well No. 1, operated by Roxana Petroleum
+Corp. Section 18, T35S, R3E, Cowley County, KS. KID: 1046935948 (matched
+KGS's live `HorizWells` query — see the main report's "estimated
+coverage" section for why this is very likely a KGS classification
+artifact, not a genuine 1928 horizontal well).
+Real source URL (public, no login, no robots.txt on this host):
+  https://kgsimages.blob.core.windows.net/web/web_1/WebDocs/ACO/E/35S3/394111.pdf
+Document label on the real well-detail page: "Deepening Record," under
+a section header "PDF files from the KGS" — a visibly different
+provenance/hosting convention than the KOLAR-era "Documents from the
+KCC" documents (see the main report's provenance model).
+
+--- representative transcription (formation-tops log, not a directional survey) ---
+
+WELL LOG BUREAU - K[ANSAS] GEOLOGICAL SOCIETY
+UNION NATIONAL B[ANK] BLDG, WICHITA, KANSAS
+
+Location: NE NW SW, 300' fr NL, 1020' fr WL.          Sec. 18  T. 35  R. 3E.
+Casing Record                                          County: Cowley.
+20" / 10"          Farm: Gally               No. 1
+15-3/8" / 6-5/8"   Company: Roxana Petr. Corp.
+12-1/2" / 5-3/16"  Contr.: -
+Total Depth: 2221'  Comm.: 11/23/25   Comp.: 11/4/1928
+Correspondence Regarding This Well Should Be Referred to [illegible stamp]
+
+Figures Indicate Bottom of Formations.                 Elevation
+Date Issued: 12/1/1928                                 Initial Production: 200,000 Cu.Ft. Gas-135# R.P.
+DEEPENING RECORD. Comm. 9/21/1928. D&A After Deepening.
+
+Formation      Depth   Formation   Depth   [Deepening Record continues in a third column...]
+clay           30      shale       1150    lime            1995
+sand HFW       80      lime        1155    rod rock        2010
+shale          150     shale       1160    sand            2015
+lime 5 BW      165     lime        1170    "3,100,000' Gas."
+...
+Total Depth    2221'
+
+Hole caved most of the time.
+
+--- transcription ends (truncated — the real document has ~90 formation-depth
+    pairs across three columns; not fully reproduced here) ---
+
+Extraction-relevant observations:
+- Image-only — no text layer at all (confirmed via `file`: a plain PDF
+  wrapping a raster scan, no embedded font/text objects). Any automated
+  pipeline needs real OCR (Tesseract or similar), not PDF text
+  extraction, for this format.
+- Contains zero directional-survey content of any kind — this is a
+  vertical-well formation-tops/casing log from 1928, decades before
+  directional drilling was practiced in Kansas. Its appearance in KGS's
+  live `HorizWells` query result set (1,180 real records, confirmed live
+  2026-09-06) is very likely a data-quality artifact in KGS's own
+  classification (see main report) — a real, concrete example of why
+  "estimated coverage" cannot simply take that query's row count at face
+  value as "wells needing trajectory extraction."
+- Real-world OCR risk factors visible in the source image: period
+  typewriter font (inconsistent letter spacing), foxing/water staining
+  obscuring some characters, a handwritten document-control number
+  ("21284") in the corner, and an illegible rubber-stamp overlay — a
+  realistic difficulty sample, not a clean modern scan.

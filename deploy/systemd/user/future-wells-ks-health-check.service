@@ -1,0 +1,32 @@
+[Unit]
+Description=Future Wells Kansas — source freshness/QA/publication-gate check (KS-17)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/yaro/projects/kansasBackend
+Environment=STATE=KS
+Environment=STATE_NAME=Kansas
+EnvironmentFile=/home/yaro/projects/kansasBackend/.env
+# `health-report` is purely informational (always exits 0, prints every
+# section to the journal for a human/alerting pipeline to read later);
+# `publication-gate-check` is the one command in this job that can fail
+# the unit — it exits non-zero the moment either hard rule (a pre-
+# permitted-year production row, or a newly detected contact/address
+# field in an exported column) is violated, so a failed run of *this*
+# service is itself the alert.
+ExecStart=/home/yaro/projects/kansasBackend/target/release/ks_ingest health-report
+ExecStart=/home/yaro/projects/kansasBackend/target/release/ks_ingest publication-gate-check
+# Deliberately not on-failure/RestartSec — a publication-gate violation
+# is a real data-quality fact, not a transient network blip; retrying it
+# on a timer would just print the same failure again. The job's own
+# timer (future-wells-ks-health-check.timer) is what re-checks next
+# cycle, same as every other KS-* ingest service in this directory only
+# retries transient rejections, not standing violations.
+Restart=no
+SyslogIdentifier=future-wells-ks-health-check
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true

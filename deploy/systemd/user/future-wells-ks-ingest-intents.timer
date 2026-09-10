@@ -1,0 +1,15 @@
+[Unit]
+Description=Daily timer for Future Wells Kansas KCC drilling-intent ingestion (KS-06)
+
+[Timer]
+# KCC's own page copy: "new intents are normally available around 6 p.m.
+# Central." Fires an hour after that stated availability, in the
+# source's own timezone (systemd resolves this against the configured
+# timezone database, independent of the host's local timezone) — not a
+# fixed UTC offset, so this stays correct across DST transitions.
+OnCalendar=*-*-* 19:00:00 America/Chicago
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

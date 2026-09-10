@@ -1,0 +1,20 @@
+[Unit]
+Description=Future Wells Kansas — KCC approved-transfer daily ingestion (KS-07)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/yaro/projects/kansasBackend
+Environment=STATE=KS
+Environment=STATE_NAME=Kansas
+EnvironmentFile=/home/yaro/projects/kansasBackend/.env
+ExecStart=/home/yaro/projects/kansasBackend/target/release/ks_ingest ingest-transfers-daily
+Restart=on-failure
+RestartSec=1800
+StartLimitIntervalSec=0
+SyslogIdentifier=future-wells-ks-ingest-transfers
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true

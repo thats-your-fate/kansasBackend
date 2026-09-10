@@ -1,0 +1,17 @@
+[Unit]
+Description=Daily timer for Future Wells Kansas source freshness/QA/publication-gate check (KS-17)
+
+[Timer]
+# Scheduled after both existing daily KCC jobs (intents at 19:00, transfers
+# at 20:00 America/Chicago — see the sibling *-ingest-intents/-transfers
+# timers) so a same-day freshness read reflects that day's completed runs
+# rather than racing them. No source in `ks_source.expected_cadence` is
+# faster than daily/continuous (see docs/ops/ks-17-monitoring-handoff.md's
+# cadence table), so once-daily is frequent enough to catch a stale or
+# failed source without alerting on a job that just hasn't run yet today.
+OnCalendar=*-*-* 22:00:00 America/Chicago
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

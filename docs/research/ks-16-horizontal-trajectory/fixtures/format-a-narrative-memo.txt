@@ -1,0 +1,72 @@
+KS-16 fixture — Format A: free-text narrative directional summary.
+
+Provenance: real, public KCC/KGS filing attachment, fetched directly
+2026-09-05 during KS-16 research. Transcribed verbatim from the PDF
+text layer (a genuine digital PDF, not a scan) — not an OCR guess.
+
+Source well: Kinney Oil Company, "Strahm Farms 1-27," Nemaha County, KS.
+API: 15-131-20219-01-00. KID: 1044661378. KCC operator license: 31439.
+Document: "Well Map" attachment to a Well Completion Report (ACO-1),
+received by KGS 2013-11-21 / 2014-03-31.
+Real source URLs (public, no login, not robots-disallowed —
+`kgsimages.blob.core.windows.net` carries no robots.txt and is not
+KCC/KGS's own web host):
+  https://kgsimages.blob.core.windows.net/kolar/filer_1/public/2014-03/solar.documents.released_pdf/doc_id=1194781.pdf  (page 4 of 4)
+  https://kgsimages.blob.core.windows.net/kolar/filer_1/public/2014-03/solar.documents_attachments.binary/sid=1034770231.pdf  (identical text, filed under the "Well Map" label — a real label/content mismatch, see the main report's "format taxonomy" section)
+
+--- verbatim transcription begins ---
+
+Kinney Oil Company  KCC # 31439
+
+Strahm Farm 1-27 Reentry And Sidetrack – API # 15-131-20219-01-00
+
+A whipstock was set in the Strahm Farm 1-27 at 3227' MD. A 6' window was milled in the
+5½" casing at: 3227'-3233' MD. The 4¾" hole was Kicked Off at 3236'MD/3230'TVD at an
+azimuth of 215° (Grid). At 3812' MD turned trajectory slightly from 215° (Grid) to 255°
+(Grid). Landed well at 4080'MD/3807'TVD with 90° inclination, azimuth of 226° (Grid).
+Continue drilling 4¾" lateral increasing inclination to 93°. Reach TD of 4912'MD/3767'TVD
+with inclination of 93° and azimuth of 224° (Grid). No casing was run in the lateral.
+Chlorides of the mud system were only 200-400 mg/liter (ppm) from the time the window
+was cut to TD.
+
+The lateral was abandoned by setting a Cast Iron Bridge Plug ("CIBP") at
+3160'MD/3155'TVD.
+
+Directional Summary:
+
+Landing Point ("Heal"):
+        Depth: 4080'MD/3807'TVD
+        Inclination: 90°
+        Azimuth: 226° (Grid)
+
+TD ("Toe"):
+         Depth: 4912'MD/3767'TVD
+         Inclination: 93°
+         Azimuth: 224° (Grid)
+
+Ground Level: 1306'
+KB: 1316'
+
+Post-Drill Well Configuration:
+
+CIBP in the 5½" casing @ 3153'MD
+6' window in the 5½" casing: 3227'-3233' MD
+CIBP in the 5½" casing (above the window) at 3160'MD/3155'TVD.
+
+--- verbatim transcription ends ---
+
+Extraction-relevant observations:
+- Genuinely digital text (a PDF text-extraction library would recover
+  this exactly, no OCR needed).
+- No structured table at all — two named points only ("Heal"/landing,
+  "Toe"/TD), each with MD, TVD, inclination, azimuth. No N/S or E/W
+  offsets given directly. No lat/long, no datum, no projection anywhere
+  in the document.
+- "Heal"/"Heel" and "Toe" are real, common industry shorthand for the
+  point a wellbore turns horizontal and its terminus — worth a
+  controlled vocabulary in any future extraction schema, not a literal
+  string match on "Landing Point"/"TD" (this operator's own phrasing
+  varies mid-document: "Landing well at..." vs. "Landing Point").
+- The word "Heal" is very likely a typo for "Heel" in the source
+  document itself — transcribed verbatim, not corrected, since a future
+  extraction pipeline will encounter the same typo in the real PDF.

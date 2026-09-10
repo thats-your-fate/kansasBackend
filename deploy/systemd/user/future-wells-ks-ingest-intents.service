@@ -1,0 +1,27 @@
+[Unit]
+Description=Future Wells Kansas — KCC drilling-intent daily ingestion (KS-06)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/yaro/projects/kansasBackend
+Environment=STATE=KS
+Environment=STATE_NAME=Kansas
+EnvironmentFile=/home/yaro/projects/kansasBackend/.env
+ExecStart=/home/yaro/projects/kansasBackend/target/release/ks_ingest ingest-intents-daily
+# Task doc: "Schedule it after the source's stated evening availability
+# ... with a delayed retry when the page is incomplete." The app itself
+# exits non-zero when a run is rejected (zero-result/partial-result
+# safeguards, or a page-structure-change alert) — Restart=on-failure
+# turns that into the retry; RestartSec is deliberately long (not the
+# API service's 5s) since a failure here almost always means "the source
+# hasn't published today's data yet," not a transient network blip.
+Restart=on-failure
+RestartSec=1800
+StartLimitIntervalSec=0
+SyslogIdentifier=future-wells-ks-ingest-intents
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true

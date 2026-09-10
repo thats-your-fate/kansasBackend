@@ -1,0 +1,12 @@
+-- KS-17: "source HTTP/content-type changes" monitoring needs somewhere
+-- to record what a fetch actually returned. Nullable and not yet
+-- populated by every importer (most of this repo's existing snapshot
+-- functions predate this task) — an honest "shape built now, wired up
+-- incrementally" column, the same precedent KS-003's `ProductionRecordKind`
+-- set for KS-10. `src/monitoring.rs`'s content-type-change report simply
+-- has nothing to compare for a source that has never recorded one yet,
+-- and says so rather than fabricating a "no change" result.
+--
+-- Rollback (plain single-file migrations, no paired .down.sql):
+--   ALTER TABLE ks_ingestion_run DROP COLUMN IF EXISTS response_content_type;
+ALTER TABLE ks_ingestion_run ADD COLUMN IF NOT EXISTS response_content_type text;

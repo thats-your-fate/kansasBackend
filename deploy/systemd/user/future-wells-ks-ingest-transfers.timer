@@ -1,0 +1,16 @@
+[Unit]
+Description=Daily timer for Future Wells Kansas KCC approved-transfer ingestion (KS-07)
+
+[Timer]
+# The task doc gives no stated availability time for the transfer source
+# (unlike KS-06's explicit "around 6 p.m. Central") — scheduled an hour
+# after the intents run (future-wells-ks-ingest-intents.timer) purely to
+# avoid both jobs starting at once, not because of any confirmed KCC
+# publication time. Revisit once the live page is reachable and its own
+# update cadence is confirmed.
+OnCalendar=*-*-* 20:00:00 America/Chicago
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
