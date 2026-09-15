@@ -1,9 +1,9 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     Json,
 };
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -13,6 +13,8 @@ use super::state::AppState;
 
 const SUMMARY_LIMIT: i64 = 8;
 const ACTIVITY_LIMIT: i64 = 8;
+const DIRECTORY_DEFAULT_PAGE_SIZE: i64 = 50;
+const DIRECTORY_MAX_PAGE_SIZE: i64 = 100;
 
 #[derive(Debug, Serialize)]
 pub struct BrowseStartPage {
@@ -27,6 +29,16 @@ pub struct BrowseSummaryEntry {
     pub key: String,
     pub display_name: String,
     pub well_count: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BrowseEntityDirectoryPage {
+    pub kind: &'static str,
+    pub page: i64,
+    pub page_size: i64,
+    pub total_items: i64,
+    pub total_pages: i64,
+    pub items: Vec<BrowseSummaryEntry>,
 }
 
 #[derive(Debug, Serialize)]
@@ -122,6 +134,12 @@ pub struct BrowseActivityEvent {
     pub lease_name: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct DirectoryQuery {
+    pub page: Option<i64>,
+    pub page_size: Option<i64>,
+}
+
 pub async fn start(
     State(state): State<AppState>,
 ) -> Result<Json<Envelope<BrowseStartPage>>, ApiError> {
@@ -163,6 +181,13 @@ pub async fn county_detail(
     entity_detail_response(&state.pool, EntityKind::County, &slug).await
 }
 
+pub async fn county_directory(
+    State(state): State<AppState>,
+    Query(query): Query<DirectoryQuery>,
+) -> Result<Json<Envelope<BrowseEntityDirectoryPage>>, ApiError> {
+    entity_directory_response(&state.pool, EntityKind::County, query).await
+}
+
 pub async fn operator_detail(
     State(state): State<AppState>,
     Path(slug): Path<String>,
@@ -170,11 +195,25 @@ pub async fn operator_detail(
     entity_detail_response(&state.pool, EntityKind::Operator, &slug).await
 }
 
+pub async fn operator_directory(
+    State(state): State<AppState>,
+    Query(query): Query<DirectoryQuery>,
+) -> Result<Json<Envelope<BrowseEntityDirectoryPage>>, ApiError> {
+    entity_directory_response(&state.pool, EntityKind::Operator, query).await
+}
+
 pub async fn field_detail(
     State(state): State<AppState>,
     Path(slug): Path<String>,
 ) -> Result<Json<Envelope<BrowseEntityDetail>>, ApiError> {
     entity_detail_response(&state.pool, EntityKind::Field, &slug).await
+}
+
+pub async fn field_directory(
+    State(state): State<AppState>,
+    Query(query): Query<DirectoryQuery>,
+) -> Result<Json<Envelope<BrowseEntityDirectoryPage>>, ApiError> {
+    entity_directory_response(&state.pool, EntityKind::Field, query).await
 }
 
 pub async fn well_detail(
@@ -210,6 +249,90 @@ async fn entity_detail_response(
 ) -> Result<Json<Envelope<BrowseEntityDetail>>, ApiError> {
     let detail = load_entity_detail(pool, kind, slug).await?;
     Ok(Json(Envelope::new(detail, detail_meta())))
+}
+
+async fn entity_directory_response(
+    pool: &sqlx::PgPool,
+    kind: EntityKind,
+    query: DirectoryQuery,
+) -> Result<Json<Envelope<BrowseEntityDirectoryPage>>, ApiError> {
+    let page = normalize_directory_page(query.page)?;
+    let page_size = normalize_directory_page_size(query.page_size)?;
+    let directory = entity_directory(pool, kind, page, page_size).await?;
+    Ok(Json(Envelope::new(directory, detail_meta())))
+}
+
+async fn entity_directory(
+    pool: &sqlx::PgPool,
+    kind: EntityKind,
+    page: i64,
+    page_size: i64,
+) -> Result<BrowseEntityDirectoryPage, ApiError> {
+    let expr = kind.sql_expr();
+    let offset = (page - 1) * page_size;
+    let sql = format!(
+        r#"
+        WITH directory AS MATERIALIZED (
+            SELECT {expr} AS display_name, count(*)::bigint AS well_count
+            FROM ks_well
+            WHERE is_tombstoned = false
+              AND {valid_value}
+            GROUP BY display_name
+        ),
+        total AS (
+            SELECT count(*)::bigint AS total_items
+            FROM directory
+        ),
+        paged AS (
+            SELECT display_name, well_count
+            FROM directory
+            ORDER BY lower(display_name) ASC, display_name ASC
+            LIMIT $1 OFFSET $2
+        )
+        SELECT total.total_items, paged.display_name, paged.well_count
+        FROM total
+        LEFT JOIN paged ON true
+        ORDER BY lower(paged.display_name) ASC, paged.display_name ASC
+        "#,
+        valid_value = valid_value_sql(kind, expr)
+    );
+    let rows = sqlx::query(&sql)
+        .bind(page_size)
+        .bind(offset)
+        .fetch_all(pool)
+        .await?;
+    let total_items = rows
+        .first()
+        .map(|row| row.get::<i64, _>("total_items"))
+        .unwrap_or(0);
+    let total_pages = total_pages(total_items, page_size);
+    if page > total_pages.max(1) {
+        return Err(ApiError::NotFound(format!(
+            "Kansas {} directory page not found",
+            kind.singular()
+        )));
+    }
+
+    let items = rows
+        .into_iter()
+        .filter_map(|row| {
+            let display_name = row.get::<Option<String>, _>("display_name")?;
+            Some(BrowseSummaryEntry {
+                key: slugify(&display_name),
+                display_name,
+                well_count: row.get("well_count"),
+            })
+        })
+        .collect();
+
+    Ok(BrowseEntityDirectoryPage {
+        kind: kind.path_segment(),
+        page,
+        page_size,
+        total_items,
+        total_pages,
+        items,
+    })
 }
 
 async fn top_counties(pool: &sqlx::PgPool) -> Result<Vec<BrowseSummaryEntry>, sqlx::Error> {
@@ -1002,6 +1125,29 @@ fn valid_value_sql(kind: EntityKind, expr: &str) -> String {
     }
 }
 
+fn normalize_directory_page(value: Option<i64>) -> Result<i64, ApiError> {
+    match value.unwrap_or(1) {
+        page if page >= 1 => Ok(page),
+        _ => Err(ApiError::bad_request("directory page must be 1 or greater")),
+    }
+}
+
+fn normalize_directory_page_size(value: Option<i64>) -> Result<i64, ApiError> {
+    match value.unwrap_or(DIRECTORY_DEFAULT_PAGE_SIZE) {
+        page_size if page_size >= 1 => Ok(page_size.min(DIRECTORY_MAX_PAGE_SIZE)),
+        _ => Err(ApiError::bad_request(
+            "directory page_size must be 1 or greater",
+        )),
+    }
+}
+
+fn total_pages(total_items: i64, page_size: i64) -> i64 {
+    if total_items <= 0 {
+        return 0;
+    }
+    (total_items + page_size - 1) / page_size
+}
+
 fn sql_slug_expr(expr: &str) -> String {
     format!(
         "trim(both '-' from lower(regexp_replace(regexp_replace(btrim({expr}), '&', ' and ', 'g'), '[^a-zA-Z0-9]+', '-', 'g')))"
@@ -1044,7 +1190,10 @@ fn human_event_type(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{human_event_type, slugify};
+    use super::{
+        human_event_type, normalize_directory_page, normalize_directory_page_size, slugify,
+        total_pages,
+    };
 
     #[test]
     fn human_event_type_formats_screaming_snake_case() {
@@ -1063,5 +1212,24 @@ mod tests {
             "eiger-operating-company-llc"
         );
         assert_eq!(slugify("Paola-Rantoul"), "paola-rantoul");
+    }
+
+    #[test]
+    fn directory_pagination_bounds_inputs() {
+        assert_eq!(normalize_directory_page(None).unwrap(), 1);
+        assert_eq!(normalize_directory_page(Some(2)).unwrap(), 2);
+        assert!(normalize_directory_page(Some(0)).is_err());
+        assert_eq!(normalize_directory_page_size(None).unwrap(), 50);
+        assert_eq!(normalize_directory_page_size(Some(12)).unwrap(), 12);
+        assert_eq!(normalize_directory_page_size(Some(500)).unwrap(), 100);
+        assert!(normalize_directory_page_size(Some(0)).is_err());
+    }
+
+    #[test]
+    fn directory_total_pages_are_bounded() {
+        assert_eq!(total_pages(0, 50), 0);
+        assert_eq!(total_pages(1, 50), 1);
+        assert_eq!(total_pages(50, 50), 1);
+        assert_eq!(total_pages(51, 50), 2);
     }
 }
