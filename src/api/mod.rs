@@ -2,6 +2,7 @@ pub mod browse;
 pub mod envelope;
 pub mod error;
 pub mod health;
+pub mod seo;
 pub mod state;
 
 use axum::{routing::get, Router};
@@ -25,6 +26,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/ks/operators/:slug", get(browse::operator_detail))
         .route("/api/ks/fields", get(browse::field_directory))
         .route("/api/ks/fields/:slug", get(browse::field_detail))
+        .route(
+            "/api/ks/seo/sitemap-directories",
+            get(seo::sitemap_directories),
+        )
         .route("/health", get(health::health))
         .with_state(state)
 }
