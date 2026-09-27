@@ -69,7 +69,7 @@ async fn entity_directory(
         WHERE is_tombstoned = false
           AND {valid_value}
         GROUP BY 1
-        ORDER BY lower(display_name) ASC, display_name ASC
+        ORDER BY lower({expr}) ASC, {expr} ASC
         "#,
         valid_value = valid_value_sql(kind, expr)
     );
