@@ -219,8 +219,9 @@ impl Config {
     /// parse `.env` itself — call `dotenvy::dotenv().ok()` before invoking
     /// this in local development, as the sibling state backends do.
     pub fn from_env() -> Result<Self, ConfigError> {
-        let database_url =
-            env::var("DATABASE_URL").map_err(|_| ConfigError::MissingVar("DATABASE_URL"))?;
+        let database_url = env::var("DATABASE_URL")
+            .or_else(|_| env::var("PG_CONNECTION"))
+            .map_err(|_| ConfigError::MissingVar("DATABASE_URL"))?;
 
         let api_host = env::var("KS_API_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
 
