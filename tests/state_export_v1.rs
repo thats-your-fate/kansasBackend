@@ -74,13 +74,13 @@ async fn insert_well(pool: &PgPool, run_id: Uuid, spec: WellSpec<'_>) -> WellFix
             api_raw, api14, well_name, county, api_validation_status, well_identity_match_method,
             lifecycle_status, well_class_raw, status_raw, comments, total_depth, producing_formation,
             horizontal_or_directional, trajectory_available, display_geometry_4326, source_format,
-            source_ingestion_run_id, is_tombstoned, tombstoned_at
+            source_ingestion_run_id, is_tombstoned, tombstoned_at, field_name, lease_name
         )
         VALUES (
             $1, $1, 'Test Well 1-H', $2, 'valid', 'api14',
             'active', 'OIL', 'AC', 'this is a raw kgs comment nobody should ever export', 4500, 'Mississippian',
             $3, $3, ST_SetSRID(ST_MakePoint($4, $5), 4326), 'arcgis',
-            $6, $7, CASE WHEN $7 THEN now() ELSE NULL END
+            $6, $7, CASE WHEN $7 THEN now() ELSE NULL END, 'Schoenchen', 'Pivonka A'
         )
         RETURNING internal_well_id
         "#,
@@ -440,6 +440,8 @@ async fn well_export_carries_geometry_identity_and_raw_status_but_never_raw_comm
         "raw KGS comments must never be exported, even into source_payload: {payload_text}"
     );
     assert_eq!(record.source.source_payload["status_raw"], json!("AC"));
+    assert_eq!(record.source.source_payload["field_name"], json!("Schoenchen"));
+    assert_eq!(record.source.source_payload["lease_name"], json!("Pivonka A"));
 
     let wellbores: Vec<future_wells_kansas::state_export::contract::WellboreV1> =
         package.records("wellbores");
@@ -448,6 +450,7 @@ async fn well_export_carries_geometry_identity_and_raw_status_but_never_raw_comm
         .find(|w| w.well_source_key.as_deref() == Some(format!("ks:well:{}", well.id).as_str()))
         .unwrap();
     assert_eq!(bore.trajectory_kind, "HORIZONTAL");
+    assert_eq!(bore.classification_method.as_deref(), Some("SOURCE_MAPPING"));
     assert_eq!(
         bore.is_lateral,
         Some(false),

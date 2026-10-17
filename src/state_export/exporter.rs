@@ -572,7 +572,7 @@ async fn export_wells(
 ) -> Result<u64> {
     let mut rows = sqlx::query(
         r#"
-        SELECT internal_well_id, api_raw, api14, well_name, county, lifecycle_status, well_class_raw,
+        SELECT internal_well_id, api_raw, api14, well_name, county, lifecycle_status, well_class_raw, field_name, lease_name,
                status_raw, status2_raw, operator_name_kgs_original, operator_name_kgs_reported_current,
                spud_date, completion_date, plug_date, permit_date,
                ST_Y(display_geometry_4326) AS surface_lat, ST_X(display_geometry_4326) AS surface_lon,
@@ -600,6 +600,8 @@ async fn export_wells(
             "status2_raw": row.try_get::<Option<String>, _>("status2_raw")?,
             "operator_name_kgs_original": row.try_get::<Option<String>, _>("operator_name_kgs_original")?,
             "operator_name_kgs_reported_current": row.try_get::<Option<String>, _>("operator_name_kgs_reported_current")?,
+            "field_name": row.try_get::<Option<String>, _>("field_name")?,
+            "lease_name": row.try_get::<Option<String>, _>("lease_name")?,
             "total_depth": row.try_get::<Option<i32>, _>("total_depth")?,
             "producing_formation": row.try_get::<Option<String>, _>("producing_formation")?,
             "formation_at_total_depth": row.try_get::<Option<String>, _>("formation_at_total_depth")?,
@@ -726,7 +728,7 @@ async fn export_wellbores(pool: &PgPool, writer: &mut EntityPartWriter) -> Resul
                 "VERTICAL".to_owned()
             },
             is_lateral: Some(false),
-            classification_method: Some("ks_well.horizontal_or_directional".to_owned()),
+            classification_method: Some("SOURCE_MAPPING".to_owned()),
             geometry_quality: None,
             status: Some(row.try_get("lifecycle_status")?),
             reported_measured_depth_ft: row

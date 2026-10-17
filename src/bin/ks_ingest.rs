@@ -243,6 +243,9 @@ enum StateExportV1Command {
         compression: String,
         #[arg(long, default_value_t = 3)]
         compression_level: i32,
+        /// Exclude fixture/test ingestion runs using session-local read views.
+        #[arg(long)]
+        exclude_test_ingestion: bool,
         #[arg(long)]
         json: bool,
     },
@@ -978,9 +981,29 @@ async fn run_state_export_v1(cfg: &Config, command: StateExportV1Command) -> any
             max_uncompressed_bytes_per_part,
             compression,
             compression_level,
+            exclude_test_ingestion,
             json,
         } => {
             let pool = db::connect(&cfg.database_url).await?;
+            let pool = if exclude_test_ingestion {
+                let options = (*pool.connect_options()).clone();
+                pool.close().await;
+                sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(1)
+                    .after_connect(|connection, _| {
+                        Box::pin(async move {
+                            use sqlx::Executor;
+                            connection
+                                .execute(include_str!("../state_export/production_views.sql"))
+                                .await?;
+                            Ok(())
+                        })
+                    })
+                    .connect_with(options)
+                    .await?
+            } else {
+                pool
+            };
             let compression = match compression.as_str() {
                 "zstd" => Compression::Zstd,
                 "none" => Compression::None,
