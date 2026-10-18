@@ -26,12 +26,14 @@ WITH well_ids AS (
  GROUP BY product,dor_code HAVING count(*)=1
 )
 INSERT INTO ks_well_lease_link(well_id,lease_id,product,link_source,link_method,confidence,source_ingestion_run_id)
-SELECT DISTINCT w.well_id,l.id,l.product,
- CASE WHEN l.lease_kid=w.kid THEN 'KGS_PRODUCT_KID' ELSE 'KGS_UNIQUE_PRODUCT_DOR_ID' END,'exact_identifier',1,$1
-FROM well_ids w JOIN ks_lease l ON l.source_ingestion_run_id=$1 AND l.product=w.product
- AND (l.lease_kid=w.kid OR (
-    NOT EXISTS(SELECT 1 FROM ks_lease k WHERE k.source_ingestion_run_id=$1 AND k.product=w.product AND k.lease_kid=w.kid)
-    AND l.dor_code=w.dor AND EXISTS(SELECT 1 FROM unique_dor d WHERE d.product=l.product AND d.dor_code=l.dor_code)))
+SELECT DISTINCT w.well_id,l.id,l.product,'KGS_PRODUCT_KID','exact_identifier',1,$1
+FROM well_ids w JOIN ks_lease l ON l.lease_kid=w.kid AND l.product=w.product AND l.source_ingestion_run_id=$1
+UNION ALL
+SELECT DISTINCT w.well_id,l.id,l.product,'KGS_UNIQUE_PRODUCT_DOR_ID','exact_identifier',1,$1
+FROM well_ids w
+JOIN unique_dor d ON d.product=w.product AND d.dor_code=w.dor
+JOIN ks_lease l ON l.source_ingestion_run_id=$1 AND l.product=d.product AND l.dor_code=d.dor_code
+WHERE NOT EXISTS(SELECT 1 FROM ks_lease k WHERE k.source_ingestion_run_id=$1 AND k.product=w.product AND k.lease_kid=w.kid)
 ON CONFLICT(well_id,lease_id,product,link_method) DO NOTHING;
 -- NEXT STATEMENT
 WITH api_tokens AS (

@@ -8,22 +8,14 @@ pub async fn repair_well_mappings(pool: &PgPool) -> anyhow::Result<u64> {
         sqlx::query("SELECT DISTINCT well_class_raw,status_raw,status2_raw FROM ks_well")
             .fetch_all(pool)
             .await?;
-    let mut tx = pool.begin().await?;
-    let mut changed = 0;
-    for row in combinations {
+    let mappings: Vec<serde_json::Value> = combinations.into_iter().map(|row| {
         let class: Option<String> = row.get("well_class_raw");
         let status: Option<String> = row.get("status_raw");
         let status2: Option<String> = row.get("status2_raw");
-        let derived = serde_json::to_value(derive_lifecycle_status(
-            class.as_deref(),
-            status.as_deref(),
-            status2.as_deref(),
-        ))?;
-        changed += sqlx::query("UPDATE ks_well SET lifecycle_status=$4,updated_at=now() WHERE well_class_raw IS NOT DISTINCT FROM $1 AND status_raw IS NOT DISTINCT FROM $2 AND status2_raw IS NOT DISTINCT FROM $3 AND lifecycle_status IS DISTINCT FROM $4")
-            .bind(class).bind(status).bind(status2).bind(derived.as_str().unwrap()).execute(&mut *tx).await?.rows_affected();
-    }
-    tx.commit().await?;
-    Ok(changed)
+        serde_json::json!({"key":[class,status,status2],"status":derive_lifecycle_status(class.as_deref(),status.as_deref(),status2.as_deref())})
+    }).collect();
+    Ok(sqlx::query("UPDATE ks_well w SET lifecycle_status=m.status,updated_at=now() FROM jsonb_to_recordset($1::jsonb) AS m(key jsonb,status text) WHERE jsonb_build_array(w.well_class_raw,w.status_raw,w.status2_raw)=m.key AND w.lifecycle_status IS DISTINCT FROM m.status")
+        .bind(serde_json::json!(mappings)).execute(pool).await?.rows_affected())
 }
 
 /// Historical dated facts only: never invent a status transition or observation date.
