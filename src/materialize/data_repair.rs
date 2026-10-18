@@ -34,7 +34,10 @@ pub async fn materialize_verified_leases(pool: &PgPool, run: Uuid) -> anyhow::Re
         .bind(run).fetch_one(&mut *tx).await?;
     anyhow::ensure!(valid, "completed KGS_LEASES run required");
     // A transaction prevents readers seeing leases without their verified links.
-    for statement in include_str!("verified_leases.sql").split("-- NEXT STATEMENT") {
+    for (index, statement) in include_str!("verified_leases.sql")
+        .split("-- NEXT STATEMENT")
+        .enumerate()
+    {
         sqlx::query(statement).bind(run).execute(&mut *tx).await?;
     }
     tx.commit().await?;
