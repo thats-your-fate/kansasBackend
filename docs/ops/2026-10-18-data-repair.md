@@ -85,6 +85,13 @@ Server verification reports:
 - Target: `~/state-sync/kansas-repair/verification-2026.json`.
 - Sync/receipts: `~/state-sync/kansas-sync/latest.json` on Future Wells Co.
 
+The existing authenticated Kansas smoke test passed after import: state selector,
+well search, Schoenchen field filtering, well profile, regional handoff, map
+(113 grid features), admin import inbox (three Kansas packages), and public
+availability (`visible=true`, `ready=true`). Its report is
+`~/state-sync/kansas-repair/general-smoke-2026.json` on the target. The daily
+Kansas sync timer is active again, and both API health endpoints are healthy.
+
 Original broad repair commands, retained for operator reference:
 
 1. `ks_ingest repair-well-mappings`
