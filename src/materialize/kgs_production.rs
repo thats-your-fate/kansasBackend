@@ -13,7 +13,7 @@
 
 use std::collections::HashSet;
 
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use crate::constants::{self, classify_production_month, should_emit_event};
@@ -89,6 +89,24 @@ pub async fn materialize_production_from_run(
 
     let (is_baseline_backfill, force_historical) =
         ingestion_run::event_policy(pool, ingestion_run_id).await?;
+    if is_baseline_backfill {
+        // Historical archives are already validated in staging. Keep the transfer
+        // inside Postgres instead of shipping millions of rows out and back.
+        sqlx::query("ANALYZE ks_lease_production_raw_snapshot")
+            .execute(pool)
+            .await?;
+        let counts = sqlx::query(include_str!("production_backfill.sql"))
+            .bind(ingestion_run_id)
+            .fetch_one(pool)
+            .await?;
+        return Ok(MaterializeOutcome {
+            created: counts.get("created"),
+            updated: counts.get("updated"),
+            skipped_unmapped_month: counts.get("skipped_unmapped_month"),
+            skipped_product_mismatch: counts.get("skipped_product_mismatch"),
+            events_emitted: 0,
+        });
+    }
     let cutoff = constants::live_monitoring_cutoff();
 
     let mut outcome = MaterializeOutcome::default();
