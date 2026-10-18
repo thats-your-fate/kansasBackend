@@ -572,7 +572,11 @@ async fn export_wells(
 ) -> Result<u64> {
     let mut rows = sqlx::query(
         r#"
-        SELECT internal_well_id, api_raw, api14, well_name, county, lifecycle_status, well_class_raw, field_name, lease_name,
+        SELECT COALESCE((SELECT jsonb_agg(DISTINCT jsonb_build_object('lease_kid', l.lease_kid, 'product', wl.product, 'method', wl.link_method))
+                    FROM ks_well_lease_link wl JOIN ks_lease l ON l.id=wl.lease_id
+                    WHERE wl.well_id=ks_well.internal_well_id AND wl.link_method IN ('exact_identifier','exact_api_number')
+                      AND wl.confidence=1 AND l.product=wl.product), '[]'::jsonb) AS verified_production_leases,
+               internal_well_id, api_raw, api14, well_name, county, lifecycle_status, well_class_raw, field_name, lease_name,
                status_raw, status2_raw, operator_name_kgs_original, operator_name_kgs_reported_current,
                spud_date, completion_date, plug_date, permit_date,
                ST_Y(display_geometry_4326) AS surface_lat, ST_X(display_geometry_4326) AS surface_lon,
@@ -593,6 +597,7 @@ async fn export_wells(
         let source_key = keys::well(id);
         let county: Option<String> = row.try_get("county")?;
         let payload = json!({
+            "verified_production_leases": row.try_get::<Value, _>("verified_production_leases")?,
             "kgs_kid": row.try_get::<Option<String>, _>("kgs_kid")?,
             "kcc_permit": row.try_get::<Option<String>, _>("kcc_permit")?,
             "well_class_raw": row.try_get::<Option<String>, _>("well_class_raw")?,
@@ -639,7 +644,11 @@ async fn export_wells(
             operator_source_key: None,
             county_source_key: county.map(|c| keys::county(&c)),
             current_status: Some(row.try_get("lifecycle_status")?),
-            well_type: row.try_get::<Option<String>, _>("well_class_raw")?,
+            well_type: crate::normalize::kgs_wells::derive_well_type(
+                row.try_get::<Option<String>, _>("well_class_raw")?
+                    .as_deref(),
+                row.try_get::<Option<String>, _>("status_raw")?.as_deref(),
+            ),
             spud_date: row.try_get::<Option<NaiveDate>, _>("spud_date")?,
             completion_date: row.try_get::<Option<NaiveDate>, _>("completion_date")?,
             first_production_date: None,
@@ -907,7 +916,7 @@ async fn export_events(pool: &PgPool, writer: &mut EntityPartWriter) -> Result<u
     // only for INTENT_POSTED via a join back to `ks_drilling_intent`.
     let mut rows = sqlx::query(
         r#"
-        SELECT id, event_type, occurred_at, published_at, related_well_id, related_operator_id, related_field_id
+        SELECT id, event_type, occurred_at, published_at, related_well_id, related_operator_id, related_field_id, payload
         FROM ks_event
         ORDER BY id
         "#,
@@ -924,6 +933,7 @@ async fn export_events(pool: &PgPool, writer: &mut EntityPartWriter) -> Result<u
         let well_source_key = related_well_id.map(keys::well);
         let source_key = keys::event(event_id);
         let payload = json!({
+            "source_event": row.try_get::<Value, _>("payload")?,
             "operator_source_key": related_operator_id.map(keys::operator),
             "field_source_key": related_field_id.map(keys::field),
         });
@@ -935,8 +945,16 @@ async fn export_events(pool: &PgPool, writer: &mut EntityPartWriter) -> Result<u
             event_subtype: None,
             event_at: row.try_get::<Option<DateTime<Utc>>, _>("occurred_at")?,
             published_at: row.try_get::<Option<DateTime<Utc>>, _>("published_at")?,
-            title: None,
-            summary: None,
+            title: row
+                .try_get::<Value, _>("payload")?
+                .get("title")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            summary: row
+                .try_get::<Value, _>("payload")?
+                .get("summary")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
             relationship_resolution_status: if well_source_key.is_some() {
                 "resolved".to_owned()
             } else {
@@ -976,6 +994,7 @@ async fn export_production_monthly(pool: &PgPool, writer: &mut EntityPartWriter)
         let volume: f64 = row.try_get("production_volume")?;
         let volume_string = volume.to_string();
         let payload = json!({
+            "product": product,
             "lease_kid": row.try_get::<String, _>("lease_kid")?,
             "reported_lease_name": row.try_get::<Option<String>, _>("reported_lease_name")?,
             "dor_code": row.try_get::<Option<String>, _>("dor_code")?,

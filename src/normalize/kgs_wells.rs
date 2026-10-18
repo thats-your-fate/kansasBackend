@@ -109,24 +109,9 @@ pub fn api_identity_is_kansas_valid(identity: &ApiIdentity) -> bool {
         .is_some_and(constants::api_digits_belong_to_state)
 }
 
-/// KGS does not publish a literal WELL_CLASS/STATUS/STATUS2 code table
-/// (confirmed at KS-04 by reading kgs.ku.edu/PRS/file_format.html in
-/// full — it describes STATUS only as "type of well" in prose). This is
-/// a best-effort pattern match against real observed values.
-///
-/// All three fields are combined into one lowercased string and matched
-/// against patterns in a single, global priority order — NOT "check
-/// STATUS2 fully, then WELL_CLASS, then STATUS." A per-field priority
-/// order was tried first and produced a real bug: a record with
-/// `STATUS="SWD-P&A"` / `STATUS2="Plugged and Abandoned"` matched
-/// STATUS2's generic "plugged" pattern before ever looking at STATUS's
-/// far more specific "swd" signal, since STATUS2 was checked to
-/// exhaustion first. Combining the fields and ranking *patterns* by
-/// specificity (most specific first, across whichever field carries it)
-/// fixes that — the field the informative signal happens to live in no
-/// longer matters. Anything no pattern matches returns `Unknown`, the
-/// correct, honest outcome per task doc §3.5: surfaced for QA, never
-/// silently collapsed to `Inactive`.
+/// Combine the KGS purpose code and KCC status description, ranking lifecycle
+/// signals before well purpose. Match whole words so inactive cannot mean active.
+/// Unknown combinations stay visible as Unknown, never default to Producing.
 pub fn derive_lifecycle_status(
     well_class: Option<&str>,
     status: Option<&str>,
@@ -149,46 +134,88 @@ fn classify_status_text(text: &str) -> Option<WellLifecycleStatus> {
     if t.is_empty() {
         return None;
     }
-    // "swd" is checked before the generic "plugged"/"d&a" patterns so a
-    // real observed compound code like "SWD-P&A" resolves to
-    // SaltwaterDisposal (its most distinctive fact) rather than the
-    // near-universal "Plugged"/"DryAndAbandoned" — a judgment call
-    // documented here since KGS gives no authoritative ruling either way.
+    let words: Vec<&str> = t.split(|c: char| !c.is_ascii_alphanumeric()).collect();
+    let has = |word: &str| words.contains(&word);
     if t.contains("expired intent") {
         Some(WellLifecycleStatus::IntentExpired)
-    } else if t.split_whitespace().any(|word| word == "loc") || t.contains("intent to drill") {
+    } else if t.contains("d&a") || t.contains("dry and abandoned") || t.contains("dry hole") {
+        Some(WellLifecycleStatus::DryAndAbandoned)
+    } else if t.contains("p&a")
+        || has("plugged")
+        || t.contains("fee fund plugging")
+        || t.contains("federal plugging")
+    {
+        Some(WellLifecycleStatus::Plugged)
+    } else if has("inactive")
+        || t.contains("shut-in")
+        || t.contains("shut in")
+        || t.contains("authorization terminated")
+        || t.contains("authority suspended")
+    {
+        Some(WellLifecycleStatus::Inactive)
+    } else if has("loc") || t.contains("intent to drill") {
         Some(WellLifecycleStatus::Planned)
     } else if t.contains("swd")
         || t.contains("saltwater disposal")
         || t.contains("salt water disposal")
     {
         Some(WellLifecycleStatus::SaltwaterDisposal)
-    } else if t.contains("d&a") || t.contains("dry and abandoned") || t.contains("dry hole") {
-        Some(WellLifecycleStatus::DryAndAbandoned)
-    } else if t.contains("plugged") || t.contains("p&a") {
-        Some(WellLifecycleStatus::Plugged)
     } else if t.contains("injection")
-        || t.split_whitespace().any(|word| word == "iw")
+        || has("iw")
+        || has("inj")
+        || has("eor")
         || t.contains("input well")
     {
         Some(WellLifecycleStatus::Injection)
-    } else if t.contains("producing")
-        || t.contains("active")
-        || t.contains("oil well")
-        || t.contains("gas well")
-    {
+    } else if has("producing") || has("active") {
         Some(WellLifecycleStatus::Producing)
-    } else if t.contains("inactive") || t.contains("shut-in") || t.contains("shut in") {
-        Some(WellLifecycleStatus::Inactive)
-    } else if t.contains("drilling") || t.contains("drilled") {
+    } else if t.contains("drilling") || has("drilled") || has("spudded") {
         Some(WellLifecycleStatus::Drilled)
-    } else if t.contains("completion") || t.contains("completed") {
+    } else if t.contains("completion") || has("completed") || has("recompleted") {
         Some(WellLifecycleStatus::Completed)
     } else if t.contains("permit") || t.contains("planned") {
         Some(WellLifecycleStatus::Planned)
     } else {
         None
     }
+}
+
+/// KGS STATUS encodes well purpose independently of lifecycle (e.g. OIL-P&A).
+/// https://www.kgs.ku.edu/Magellan/Elog/status.html
+pub fn derive_well_type(well_class: Option<&str>, status: Option<&str>) -> Option<String> {
+    let raw = status.or(well_class)?.trim().to_ascii_uppercase();
+    let code = raw.split("-P&A").next().unwrap_or(&raw);
+    let kind = match code {
+        "OIL" | "OIL WELL" => "OIL",
+        "GAS" | "GAS WELL" => "GAS",
+        "O&G" | "OIL/GAS" | "OIL AND GAS" => "OIL AND GAS",
+        "CBM" => "COALBED METHANE",
+        "SWD" => "SALTWATER DISPOSAL",
+        "EOR" => "ENHANCED OIL RECOVERY",
+        "INJ" => "INJECTION",
+        "D&A" => "DRY HOLE",
+        _ if code.starts_with("OTHER") => {
+            let detail = code.split_once('(').and_then(|(_, s)| s.strip_suffix(')'));
+            match detail {
+                Some("CATH") => "CATHODIC PROTECTION",
+                Some("WATER") => "WATER",
+                Some("STRAT") => "STRATIGRAPHIC TEST",
+                Some("OBS") => "OBSERVATION",
+                Some("GSW" | "GAS-STG") => "GAS STORAGE",
+                Some("GAS-INJ" | "OIL&GAS-INJ" | "INJ OR EOR" | "CLASS1" | "CLASS ONE (OLD)") => {
+                    "INJECTION"
+                }
+                Some("HELIUM") => "HELIUM",
+                _ => return None,
+            }
+        }
+        _ => {
+            return well_class
+                .filter(|v| !v.trim().is_empty())
+                .map(str::to_owned)
+        }
+    };
+    Some(kind.to_owned())
 }
 
 /// Parses a KGS date string. The two sources use different formats
@@ -344,7 +371,7 @@ mod tests {
     fn saltwater_disposal_compound_code_from_real_observed_values() {
         assert_eq!(
             derive_lifecycle_status(None, Some("SWD-P&A"), Some("Plugged and Abandoned")),
-            WellLifecycleStatus::SaltwaterDisposal
+            WellLifecycleStatus::Plugged
         );
     }
 
@@ -374,6 +401,38 @@ mod tests {
             derive_lifecycle_status(None, None, Some("Injection Well")),
             WellLifecycleStatus::Injection
         );
+    }
+
+    #[test]
+    fn status_does_not_confuse_purpose_with_activity() {
+        for code in ["OIL", "GAS", "SWD", "EOR", "OTHER(CATH)"] {
+            assert_eq!(
+                derive_lifecycle_status(None, Some(code), Some("Inactive Well")),
+                WellLifecycleStatus::Inactive
+            );
+        }
+        assert_eq!(
+            derive_lifecycle_status(None, Some("OIL"), Some("Well Drilled")),
+            WellLifecycleStatus::Drilled
+        );
+        assert_eq!(
+            derive_lifecycle_status(None, Some("GAS"), Some("Recompleted")),
+            WellLifecycleStatus::Completed
+        );
+        assert_eq!(
+            derive_lifecycle_status(None, Some("OIL"), None),
+            WellLifecycleStatus::Unknown
+        );
+        assert_eq!(
+            derive_lifecycle_status(None, Some("SWD-P&A"), Some("Plugged and Abandoned")),
+            WellLifecycleStatus::Plugged
+        );
+        assert_eq!(
+            derive_well_type(None, Some("OIL-P&A")).as_deref(),
+            Some("OIL")
+        );
+        assert_eq!(derive_well_type(None, Some("GAS")).as_deref(), Some("GAS"));
+        assert_eq!(derive_well_type(None, Some("LOC")), None);
     }
 
     // --- date parsing ---

@@ -169,47 +169,35 @@ async fn persist_rows(
 ) -> Result<(), sqlx::Error> {
     use sha2::{Digest, Sha256};
     let mut tx = pool.begin().await?;
-    for row in rows {
-        let mut hasher = Sha256::new();
-        hasher.update(row.raw_data.to_string().as_bytes());
-        let hash = format!("{:x}", hasher.finalize());
-
-        sqlx::query(
-            r#"
-            INSERT INTO ks_lease_raw_snapshot (
-                ingestion_run_id, lease_kid, rejection_reason, reported_lease_name, dor_code, api_number_raw,
-                operator, county, township, township_direction, range, range_direction, section, spot,
-                source_latitude, source_longitude, produces_raw, production, year_start, year_stop,
-                source_url, raw_data, source_record_hash
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
-            "#,
-        )
-        .bind(run_id)
-        .bind(&row.lease_kid)
-        .bind(row.rejection_reason)
-        .bind(&row.reported_lease_name)
-        .bind(&row.dor_code)
-        .bind(&row.api_number_raw)
-        .bind(&row.operator)
-        .bind(&row.county)
-        .bind(row.township)
-        .bind(&row.township_direction)
-        .bind(row.range)
-        .bind(&row.range_direction)
-        .bind(row.section)
-        .bind(&row.spot)
-        .bind(row.source_latitude)
-        .bind(row.source_longitude)
-        .bind(&row.produces_raw)
-        .bind(row.production)
-        .bind(row.year_start)
-        .bind(row.year_stop)
-        .bind(&row.source_url)
-        .bind(&row.raw_data)
-        .bind(&hash)
-        .execute(&mut *tx)
-        .await?;
+    for batch in rows.chunks(1000) {
+        let mut query = sqlx::QueryBuilder::new("INSERT INTO ks_lease_raw_snapshot (ingestion_run_id,lease_kid,rejection_reason,reported_lease_name,dor_code,api_number_raw,operator,county,township,township_direction,range,range_direction,section,spot,source_latitude,source_longitude,produces_raw,production,year_start,year_stop,source_url,raw_data,source_record_hash) ");
+        query.push_values(batch, |mut b, row| {
+            let hash = format!("{:x}", Sha256::digest(row.raw_data.to_string().as_bytes()));
+            b.push_bind(run_id)
+                .push_bind(&row.lease_kid)
+                .push_bind(row.rejection_reason)
+                .push_bind(&row.reported_lease_name)
+                .push_bind(&row.dor_code)
+                .push_bind(&row.api_number_raw)
+                .push_bind(&row.operator)
+                .push_bind(&row.county)
+                .push_bind(row.township)
+                .push_bind(&row.township_direction)
+                .push_bind(row.range)
+                .push_bind(&row.range_direction)
+                .push_bind(row.section)
+                .push_bind(&row.spot)
+                .push_bind(row.source_latitude)
+                .push_bind(row.source_longitude)
+                .push_bind(&row.produces_raw)
+                .push_bind(row.production)
+                .push_bind(row.year_start)
+                .push_bind(row.year_stop)
+                .push_bind(&row.source_url)
+                .push_bind(&row.raw_data)
+                .push_bind(hash);
+        });
+        query.build().execute(&mut *tx).await?;
     }
     tx.commit().await
 }

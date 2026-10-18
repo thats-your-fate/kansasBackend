@@ -210,6 +210,12 @@ enum Command {
     /// KS-17: the two hard publication gates (restricted-year production rows; personal-contact-field
     /// leakage into an exported/indexed column). Exits non-zero if either finds a violation.
     PublicationGateCheck,
+    /// Recompute lifecycle mappings without creating source activity events.
+    RepairWellMappings,
+    /// Backfill explicitly labelled historical spud/completion/plugging events.
+    BackfillWellHistory,
+    /// Materialize statewide leases with verified identifier/API associations only.
+    MaterializeVerifiedLeases { run_id: Uuid },
     /// KS-14: mark an ingestion run as a historical baseline/backfill before materializing it,
     /// so its event-emitting materializer (wells/production/intents/transfers) suppresses events
     /// for historical (pre-live-monitoring-cutoff) dates rather than flooding the event log.
@@ -306,6 +312,28 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Config::from_env()?;
 
     match cli.command {
+        Command::RepairWellMappings => {
+            let pool = db::connect(&cfg.database_url).await?;
+            println!(
+                "updated: {}",
+                future_wells_kansas::materialize::data_repair::repair_well_mappings(&pool).await?
+            );
+        }
+        Command::BackfillWellHistory => {
+            let pool = db::connect(&cfg.database_url).await?;
+            println!(
+                "historical_events_inserted: {}",
+                future_wells_kansas::materialize::data_repair::backfill_well_history(&pool).await?
+            );
+        }
+        Command::MaterializeVerifiedLeases { run_id } => {
+            let pool = db::connect(&cfg.database_url).await?;
+            future_wells_kansas::materialize::data_repair::materialize_verified_leases(
+                &pool, run_id,
+            )
+            .await?;
+            println!("verified leases materialized: {run_id}");
+        }
         Command::Status => {
             let pool = db::connect(&cfg.database_url).await?;
             sqlx::query("SELECT 1").execute(&pool).await?;

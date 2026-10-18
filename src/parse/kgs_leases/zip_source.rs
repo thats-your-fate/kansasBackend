@@ -10,7 +10,6 @@
 //! staged raw value stays byte-for-byte auditable.
 
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::Path;
 
 pub use crate::parse::kgs_wells::zip_source::{download_zip, DownloadedZip};
@@ -62,14 +61,11 @@ pub fn parse_lease_zip(path: &Path) -> Result<Vec<RawLeaseRow>, LeaseZipError> {
         )));
     }
 
-    let mut entry = archive.by_index(0)?;
-    let mut contents = String::new();
-    entry.read_to_string(&mut contents)?;
-    drop(entry);
+    let entry = archive.by_index(0)?;
 
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
-        .from_reader(contents.as_bytes());
+        .from_reader(entry);
     let headers = reader.headers()?.clone();
     let column_index: HashMap<String, usize> = headers
         .iter()

@@ -1,3 +1,4 @@
+pub mod data_repair;
 pub mod kcc_intents;
 pub mod kcc_operators;
 pub mod kcc_transfers;

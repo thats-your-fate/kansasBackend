@@ -3,7 +3,7 @@
 CREATE TEMP VIEW ks_sync_real_ingestion_runs AS
 SELECT id FROM public.ks_ingestion_run
 WHERE coalesce(parser_version, '') !~* '(^|[-_])(test|fixture)'
-  AND coalesce(source_url, '') !~* '(example[.]invalid|test[-_]?fixture)';
+  AND coalesce(source_url, '') !~* '(example[.]invalid|test[-_]?fixture|127[.]0[.]0[.]1|localhost)';
 
 DO $$
 DECLARE table_name text;
@@ -48,3 +48,9 @@ CREATE TEMP VIEW ks_operator_transfer_well AS
 SELECT t.* FROM public.ks_operator_transfer_well t
 WHERE t.well_id IN (SELECT internal_well_id FROM pg_temp.ks_well)
   AND t.transfer_id IN (SELECT id FROM pg_temp.ks_operator_transfer);
+
+CREATE TEMP VIEW ks_well_lease_link AS
+SELECT link.* FROM public.ks_well_lease_link link
+WHERE link.well_id IN (SELECT internal_well_id FROM pg_temp.ks_well)
+  AND link.lease_id IN (SELECT id FROM pg_temp.ks_lease)
+  AND link.source_ingestion_run_id IN (SELECT id FROM pg_temp.ks_sync_real_ingestion_runs);
