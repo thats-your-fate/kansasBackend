@@ -7,6 +7,7 @@ WITH eligible AS MATERIALIZED (
  r.reported_contributing_wells,r.production_volume,r.source_url,r.source_record_hash
  FROM ks_lease_production_raw_snapshot r LEFT JOIN ks_lease l ON l.lease_kid=r.lease_kid
  WHERE r.ingestion_run_id=$1 AND r.rejection_reason IS NULL AND r.lease_kid IS NOT NULL
+ AND ($2::integer IS NULL OR r.year=$2)
 ), upserted AS (
  INSERT INTO ks_lease_production_month(lease_id,lease_kid,reported_lease_name,dor_code,api_number_raw,
  field_name,producing_zone,operator,county,township,township_direction,range,range_direction,section,spot,

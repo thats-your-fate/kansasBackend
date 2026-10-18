@@ -90,6 +90,8 @@ pub struct ExportOptions {
     pub max_uncompressed_bytes_per_part: u64,
     pub compression: Compression,
     pub compression_level: i32,
+    /// Include monthly production only for this reporting year, when specified.
+    pub production_year: Option<i32>,
 }
 
 impl Default for ExportOptions {
@@ -101,6 +103,7 @@ impl Default for ExportOptions {
             max_uncompressed_bytes_per_part: 128 * 1024 * 1024,
             compression: Compression::Zstd,
             compression_level: 3,
+            production_year: None,
         }
     }
 }
@@ -342,7 +345,9 @@ async fn export_entity(
         | "event_document_links" => 0,
         "regulatory_records" => export_regulatory_records(pool, &mut writer).await?,
         "events" => export_events(pool, &mut writer).await?,
-        "production_monthly" => export_production_monthly(pool, &mut writer).await?,
+        "production_monthly" => {
+            export_production_monthly(pool, &mut writer, options.production_year).await?
+        }
         "tombstones" => export_tombstones(pool, &mut writer).await?,
         other => bail!("unknown entity type {other}"),
     };
@@ -973,7 +978,11 @@ async fn export_events(pool: &PgPool, writer: &mut EntityPartWriter) -> Result<u
     Ok(count)
 }
 
-async fn export_production_monthly(pool: &PgPool, writer: &mut EntityPartWriter) -> Result<u64> {
+async fn export_production_monthly(
+    pool: &PgPool,
+    writer: &mut EntityPartWriter,
+    year: Option<i32>,
+) -> Result<u64> {
     let mut rows = sqlx::query(
         r#"
         SELECT id, lease_kid, product, year, month, production_volume, reported_lease_name, dor_code,
@@ -982,9 +991,11 @@ async fn export_production_monthly(pool: &PgPool, writer: &mut EntityPartWriter)
                reported_contributing_wells, source_url
         FROM ks_lease_production_month
         WHERE record_kind = 'monthly'
+          AND ($1::integer IS NULL OR year = $1)
         ORDER BY id
         "#,
     )
+    .bind(year)
     .fetch(pool);
 
     let mut count = 0_u64;

@@ -18,7 +18,7 @@ use future_wells_kansas::materialize::kgs_leases::{
     materialize_leases_from_run, unresolved_lease_apis_report,
 };
 use future_wells_kansas::materialize::kgs_production::{
-    coverage_summary, materialize_production_from_run, reconciliation_report,
+    coverage_summary, materialize_production_from_run_for_year, reconciliation_report,
     ReconciliationGrouping,
 };
 use future_wells_kansas::materialize::kgs_wells::{
@@ -168,7 +168,12 @@ enum Command {
     /// (oil/gas x 2020-present/2010-2019/2000-2009/1990-1999). Confirmed live 2026-09-05.
     SnapshotProduction,
     /// KS-10: materialize a completed snapshot-production run into ks_lease_production_month.
-    MaterializeProduction { run_id: Uuid },
+    MaterializeProduction {
+        run_id: Uuid,
+        /// Process only this reporting year from the staged archive.
+        #[arg(long, value_parser = clap::value_parser!(i32).range(1990..=9999))]
+        year: Option<i32>,
+    },
     /// KS-10: print latest_oil_month/latest_gas_month/last_successful_import coverage metadata.
     ProductionCoverageReport,
     /// KS-10: reconcile summed monthly production against KGS's own reported yearly totals.
@@ -252,6 +257,9 @@ enum StateExportV1Command {
         /// Exclude fixture/test ingestion runs using session-local read views.
         #[arg(long)]
         exclude_test_ingestion: bool,
+        /// Export monthly production only for this reporting year.
+        #[arg(long, env = "KS_EXPORT_PRODUCTION_YEAR", value_parser = clap::value_parser!(i32).range(1990..=9999))]
+        production_year: Option<i32>,
         #[arg(long)]
         json: bool,
     },
@@ -713,9 +721,9 @@ async fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         }
-        Command::MaterializeProduction { run_id } => {
+        Command::MaterializeProduction { run_id, year } => {
             let pool = db::connect(&cfg.database_url).await?;
-            let outcome = materialize_production_from_run(&pool, run_id).await?;
+            let outcome = materialize_production_from_run_for_year(&pool, run_id, year).await?;
             println!("created: {}", outcome.created);
             println!("updated: {}", outcome.updated);
             println!("skipped_unmapped_month: {}", outcome.skipped_unmapped_month);
@@ -1010,6 +1018,7 @@ async fn run_state_export_v1(cfg: &Config, command: StateExportV1Command) -> any
             compression,
             compression_level,
             exclude_test_ingestion,
+            production_year,
             json,
         } => {
             let pool = db::connect(&cfg.database_url).await?;
@@ -1044,6 +1053,7 @@ async fn run_state_export_v1(cfg: &Config, command: StateExportV1Command) -> any
                 max_uncompressed_bytes_per_part,
                 compression,
                 compression_level,
+                production_year,
             };
             let summary = state_export::export_state_v1(&pool, ExportModeV1::Full, options).await?;
             if json {
@@ -1075,6 +1085,7 @@ async fn run_state_export_v1(cfg: &Config, command: StateExportV1Command) -> any
                         "compressed_bytes": summary.total_compressed_bytes,
                         "elapsed_ms": summary.elapsed.as_millis(),
                         "records_by_entity": records_by_entity,
+                        "production_year": production_year,
                     }))?
                 );
             } else {

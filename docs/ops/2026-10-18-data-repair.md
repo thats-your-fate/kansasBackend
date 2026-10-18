@@ -16,6 +16,19 @@ Official field definitions:
 
 Operational commands (run from the backend directory after migrations):
 
+Scope updated: deliver **2026 production only**. The all-years materializer was
+stopped; older partially materialized rows stay in the source database and are
+excluded from this delivery. Do not resume the historical runner for this task.
+Use the two completed `2020_present` official archive runs with
+`ks_ingest materialize-production RUN_UUID --year 2026` after marking them as
+backfills. Export with `--production-year 2026` (or
+`KS_EXPORT_PRODUCTION_YEAR=2026` in the existing exporter service). The year filter
+also excludes annual/cumulative sentinel rows from the monthly export as before.
+Local regression tests verify year-limited processing, idempotence, lease-level
+volumes, and exclusion of other years from an otherwise full entity snapshot.
+
+Original broad repair commands, retained for operator reference:
+
 1. `ks_ingest repair-well-mappings`
 2. `ks_ingest snapshot-leases`, then `materialize-verified-leases RUN_UUID`.
 3. `ks_ingest snapshot-production`, mark each completed archive run as backfill,

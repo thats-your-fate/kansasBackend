@@ -139,3 +139,105 @@ async fn repairs_are_repeatable_and_lease_links_require_product_scoped_evidence(
     assert_eq!(check, (1, 10.5));
     pool.close().await;
 }
+
+#[tokio::test]
+async fn reporting_year_limits_materialization_and_export_without_allocating_lease_volumes() {
+    use future_wells_kansas::{
+        materialize::kgs_production::materialize_production_from_run_for_year,
+        state_export::{
+            self,
+            contract::{ExportModeV1, ProductionMonthlyV1},
+            package::Compression,
+            ExportOptions,
+        },
+    };
+    let pool = PgPool::connect(
+        &std::env::var("DATABASE_URL").expect("isolated test DATABASE_URL required"),
+    )
+    .await
+    .unwrap();
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+    let source = registry::find_source_by_code(&pool, "KGS_PRODUCTION_OIL")
+        .await
+        .unwrap()
+        .unwrap();
+    let run = ingestion_run::start_run(
+        &pool,
+        ingestion_run::DownloadedPayload {
+            source_id: source.id,
+            source_url: "test-fixture",
+            retrieved_at: Utc::now(),
+            source_modified_at: None,
+            payload_checksum: &Uuid::new_v4().to_string(),
+            schema_fingerprint: None,
+            parser_version: "test-fixture",
+        },
+    )
+    .await
+    .unwrap();
+    let lease = Uuid::new_v4().to_string();
+    for (year, month) in [(2025, 1_i16), (2026, 1), (2026, 0), (2027, 1)] {
+        sqlx::query("INSERT INTO ks_lease_production_raw_snapshot(ingestion_run_id,source_file,lease_kid,year,month,product_raw,production_volume,source_record_hash,raw_data) VALUES($1,'fixture.zip',$2,$3,$4,'O',12.5,$5,'{}')")
+            .bind(run).bind(&lease).bind(year).bind(month).bind(format!("{year}-{month}")).execute(&pool).await.unwrap();
+    }
+    ingestion_run::complete_run(&pool, run, 4, 0, None, None, json!({}))
+        .await
+        .unwrap();
+    ingestion_run::mark_as_backfill(&pool, run).await.unwrap();
+    let first = materialize_production_from_run_for_year(&pool, run, Some(2026))
+        .await
+        .unwrap();
+    assert_eq!((first.created, first.events_emitted), (2, 0));
+    let years: Vec<i32> = sqlx::query_scalar(
+        "SELECT DISTINCT year FROM ks_lease_production_month WHERE source_ingestion_run_id=$1",
+    )
+    .bind(run)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(years, vec![2026]);
+    let again = materialize_production_from_run_for_year(&pool, run, Some(2026))
+        .await
+        .unwrap();
+    assert_eq!((again.created, again.updated), (0, 2));
+    materialize_production_from_run_for_year(&pool, run, Some(2025))
+        .await
+        .unwrap();
+    let output = std::env::temp_dir().join(format!("ks-year-export-{}", Uuid::new_v4()));
+    let summary = state_export::export_state_v1(
+        &pool,
+        ExportModeV1::Full,
+        ExportOptions {
+            output_dir: output.clone(),
+            compression: Compression::None,
+            production_year: Some(2026),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let manifest = state_export::verify_package(&summary.output_path).unwrap();
+    let mut own_rows = 0;
+    for file in manifest
+        .files
+        .iter()
+        .filter(|f| f.entity_type == "production_monthly")
+    {
+        for line in std::fs::read_to_string(summary.output_path.join(&file.filename))
+            .unwrap()
+            .lines()
+        {
+            let row: ProductionMonthlyV1 = serde_json::from_str(line).unwrap();
+            assert!(row.production_month.to_string().starts_with("2026-"));
+            assert_eq!(row.well_source_key, None);
+            assert_eq!(row.source_allocation_type.as_deref(), Some("lease"));
+            if row.source.source_payload["lease_kid"] == json!(lease) {
+                own_rows += 1;
+                assert_eq!(row.oil_volume.as_deref(), Some("12.5"));
+            }
+        }
+    }
+    assert_eq!(own_rows, 1);
+    std::fs::remove_dir_all(output).unwrap();
+    pool.close().await;
+}
