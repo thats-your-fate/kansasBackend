@@ -39,6 +39,10 @@ pub async fn materialize_verified_leases(pool: &PgPool, run: Uuid) -> anyhow::Re
         .enumerate()
     {
         sqlx::query(statement).bind(run).execute(&mut *tx).await?;
+        if index == 0 {
+            // The initial statewide load replaces fixture-sized statistics.
+            sqlx::query("ANALYZE ks_lease").execute(&mut *tx).await?;
+        }
     }
     tx.commit().await?;
     Ok(())
