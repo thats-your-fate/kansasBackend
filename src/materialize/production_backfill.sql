@@ -2,12 +2,11 @@ WITH eligible AS MATERIALIZED (
  SELECT l.id AS lease_id,r.lease_kid,r.reported_lease_name,r.dor_code,r.api_number_raw,r.field_name,
  r.producing_zone,r.operator,r.county,r.township,r.township_direction,r.range,r.range_direction,r.section,
  r.spot,r.source_latitude,r.source_longitude,r.year,r.month,
- CASE r.month WHEN 0 THEN 'yearly_total' WHEN -1 THEN 'starting_cumulative' ELSE 'monthly' END AS record_kind,
- CASE upper(btrim(r.product_raw)) WHEN 'O' THEN 'oil' WHEN 'OIL' THEN 'oil' ELSE 'gas' END AS product,
+ CASE WHEN r.month=0 THEN 'yearly_total' WHEN r.month=-1 THEN 'starting_cumulative' WHEN r.month BETWEEN 1 AND 12 THEN 'monthly' END AS record_kind,
+ CASE upper(btrim(r.product_raw)) WHEN 'O' THEN 'oil' WHEN 'OIL' THEN 'oil' WHEN 'G' THEN 'gas' WHEN 'GAS' THEN 'gas' END AS product,
  r.reported_contributing_wells,r.production_volume,r.source_url,r.source_record_hash
  FROM ks_lease_production_raw_snapshot r LEFT JOIN ks_lease l ON l.lease_kid=r.lease_kid
  WHERE r.ingestion_run_id=$1 AND r.rejection_reason IS NULL AND r.lease_kid IS NOT NULL
-   AND r.month BETWEEN -1 AND 12 AND upper(btrim(r.product_raw)) IN ('O','OIL','G','GAS')
 ), upserted AS (
  INSERT INTO ks_lease_production_month(lease_id,lease_kid,reported_lease_name,dor_code,api_number_raw,
  field_name,producing_zone,operator,county,township,township_direction,range,range_direction,section,spot,
@@ -16,6 +15,7 @@ WITH eligible AS MATERIALIZED (
  SELECT lease_id,lease_kid,reported_lease_name,dor_code,api_number_raw,field_name,producing_zone,operator,county,
  township,township_direction,range,range_direction,section,spot,source_latitude,source_longitude,year,month,
  record_kind,product,reported_contributing_wells,production_volume,source_url,$1,source_record_hash FROM eligible
+ WHERE record_kind IS NOT NULL AND product IS NOT NULL
  ON CONFLICT(lease_kid,product,year,month) DO UPDATE SET
  lease_id=coalesce(EXCLUDED.lease_id,ks_lease_production_month.lease_id),reported_lease_name=EXCLUDED.reported_lease_name,
  dor_code=EXCLUDED.dor_code,api_number_raw=EXCLUDED.api_number_raw,field_name=EXCLUDED.field_name,
@@ -31,10 +31,7 @@ WITH eligible AS MATERIALIZED (
  RETURNING (xmax=0) AS was_inserted
 )
 SELECT count(*) FILTER(WHERE was_inserted)::bigint AS created,
- (SELECT count(*) FROM eligible)-count(*) FILTER(WHERE was_inserted) AS updated,
- (SELECT count(*) FROM ks_lease_production_raw_snapshot WHERE ingestion_run_id=$1 AND rejection_reason IS NULL
-   AND lease_kid IS NOT NULL AND month NOT BETWEEN -1 AND 12) AS skipped_unmapped_month,
- (SELECT count(*) FROM ks_lease_production_raw_snapshot WHERE ingestion_run_id=$1 AND rejection_reason IS NULL
-   AND lease_kid IS NOT NULL AND month BETWEEN -1 AND 12
-   AND (product_raw IS NULL OR upper(btrim(product_raw)) NOT IN ('O','OIL','G','GAS'))) AS skipped_product_mismatch
+ (SELECT count(*) FROM eligible WHERE record_kind IS NOT NULL AND product IS NOT NULL)-count(*) FILTER(WHERE was_inserted) AS updated,
+ (SELECT count(*) FROM eligible WHERE month NOT BETWEEN -1 AND 12) AS skipped_unmapped_month,
+ (SELECT count(*) FROM eligible WHERE month BETWEEN -1 AND 12 AND product IS NULL) AS skipped_product_mismatch
 FROM upserted;

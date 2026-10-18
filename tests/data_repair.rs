@@ -108,6 +108,10 @@ async fn repairs_are_repeatable_and_lease_links_require_product_scoped_evidence(
         sqlx::query("INSERT INTO ks_lease_production_raw_snapshot(ingestion_run_id,source_file,lease_kid,year,month,product_raw,production_volume,source_record_hash,raw_data) VALUES($1,'oil_leases_2020_present.zip',$2,2020,$3,'O',10.5,$4,'{}')")
             .bind(prod_run).bind(format!("{key}-oil")).bind(month as i16).bind(hash).execute(&pool).await.unwrap();
     }
+    for (month, product) in [(13_i16, "O"), (2_i16, "invalid")] {
+        sqlx::query("INSERT INTO ks_lease_production_raw_snapshot(ingestion_run_id,source_file,lease_kid,year,month,product_raw,production_volume,source_record_hash,raw_data) VALUES($1,'oil_leases_2020_present.zip',$2,2020,$3,$4,10.5,'invalid-fixture','{}')")
+            .bind(prod_run).bind(format!("{key}-oil")).bind(month).bind(product).execute(&pool).await.unwrap();
+    }
     let first = future_wells_kansas::materialize::kgs_production::materialize_production_from_run(
         &pool, prod_run,
     )
@@ -116,6 +120,10 @@ async fn repairs_are_repeatable_and_lease_links_require_product_scoped_evidence(
     assert_eq!(
         (first.created, first.updated, first.events_emitted),
         (2, 0, 0)
+    );
+    assert_eq!(
+        (first.skipped_unmapped_month, first.skipped_product_mismatch),
+        (1, 1)
     );
     let second = future_wells_kansas::materialize::kgs_production::materialize_production_from_run(
         &pool, prod_run,
