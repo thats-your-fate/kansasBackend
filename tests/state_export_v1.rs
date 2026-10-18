@@ -429,7 +429,7 @@ async fn well_export_carries_geometry_identity_and_raw_status_but_never_raw_comm
     );
     assert_eq!(
         record.county_source_key.as_deref(),
-        Some("ks:county:barton")
+        Some("ks:county:barton-county")
     );
     assert_eq!(record.surface_latitude.as_deref(), Some("38.1234567"));
     assert_eq!(record.surface_longitude.as_deref(), Some("-98.7654321"));
@@ -714,7 +714,7 @@ async fn fields_and_leases_both_export_as_regulatory_areas_with_distinct_area_ty
     assert_eq!(lease_record.area_type, "lease");
     assert_eq!(
         lease_record.county_source_key.as_deref(),
-        Some("ks:county:barton")
+        Some("ks:county:barton-county")
     );
 }
 
@@ -751,11 +751,13 @@ async fn counties_are_derived_from_distinct_observed_names_across_source_tables(
     )
     .await;
 
+    insert_lease(&pool, run_id, "reno county").await;
     let package = run_export(&pool).await;
     let counties: Vec<CountyV1> = package.records("counties");
+    assert_eq!(counties.iter().filter(|c| c.name=="Reno County").count(),1);
     assert!(counties
         .iter()
-        .any(|c| c.name == "Reno" && c.source.source_key == "ks:county:reno"));
+        .any(|c| c.name == "Reno County" && c.source.source_key == "ks:county:reno-county"));
 }
 
 #[tokio::test]

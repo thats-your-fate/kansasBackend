@@ -409,8 +409,13 @@ async fn export_counties(pool: &PgPool, writer: &mut EntityPartWriter) -> Result
     .await?;
 
     let mut count = 0_u64;
+    let mut seen = std::collections::HashSet::new();
     for name in names {
+        let name = keys::county_name(&name);
         let source_key = keys::county(&name);
+        if !seen.insert(source_key.clone()) {
+            continue;
+        }
         let record = CountyV1 {
             source: envelope(source_key.clone(), None, json!({})),
             name: name.clone(),

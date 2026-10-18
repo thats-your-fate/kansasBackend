@@ -12,7 +12,24 @@
 //! Kansas tables), so it is keyed by a normalized-name slug instead.
 
 pub fn county(name: &str) -> String {
-    format!("ks:county:{}", slug(name))
+    format!("ks:county:{}", slug(&county_name(name)))
+}
+
+/// Lease archives omit the suffix present on the well inventory. Preserve the
+/// deployed well-county identity when these datasets are exported together.
+pub fn county_name(name: &str) -> String {
+    let normalized = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    let base = if normalized.to_ascii_lowercase().ends_with(" county") {
+        normalized[..normalized.len() - 7].trim()
+    } else {
+        normalized.trim()
+    };
+    let canonical = crate::constants::KS_COUNTIES
+        .iter()
+        .find(|county| county.eq_ignore_ascii_case(base))
+        .copied()
+        .unwrap_or(base);
+    format!("{canonical} County")
 }
 
 pub fn operator(operator_id: uuid::Uuid) -> String {
@@ -98,7 +115,7 @@ mod tests {
 
     #[test]
     fn county_keys_are_deterministic() {
-        assert_eq!(county("Barton"), county("Barton"));
+        assert_eq!(county("Barton"), county("Barton County"));
         assert_eq!(county("Barton County"), county("barton   county"));
     }
 
