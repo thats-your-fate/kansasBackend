@@ -87,6 +87,8 @@ def parse_page(body, kid, expected_api):
         raise ValueError('KGS page identity mismatch or missing identity')
     documents = {}
     for item in page.items:
+        if re.search(r'confidential|restricted|login required', item['text'], re.I):
+            continue
         for link in item['links']:
             if not allowed_pdf(link['url']):
                 continue

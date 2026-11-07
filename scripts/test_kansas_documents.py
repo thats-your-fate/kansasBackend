@@ -47,6 +47,10 @@ class PublicDocuments(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_page(PAGE+PAGE.replace('Aug 06','Aug 07'),'1057551044','15163245390000')
 
+    def test_explicit_restriction_overrides_public_url(self):
+        body=PAGE.replace('Intent To Drill Well</a>', 'Confidential Intent To Drill Well</a>')
+        self.assertEqual(parse_page(body,'1057551044','15163245390000'),[])
+
     def test_api_suffix_is_preserved(self):
         self.assertEqual(api14('15-163-24539'),'15163245390000')
         self.assertEqual(api14('15-163-24539-0100'),'15163245390100')
