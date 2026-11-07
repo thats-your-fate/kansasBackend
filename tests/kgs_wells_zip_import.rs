@@ -61,6 +61,28 @@ fn fast_retry_policy() -> RetryPolicy {
     }
 }
 
+#[test]
+fn zip_reader_delivers_bounded_batches_and_preserves_source_classification() {
+    use future_wells_kansas::parse::kgs_wells::zip_source::stream_zip_wells;
+    let path = std::env::temp_dir().join(format!("ks-stream-{}.zip", uuid::Uuid::new_v4()));
+    std::fs::write(&path, build_fixture_zip("bounded_batches")).unwrap();
+    let mut sizes = Vec::new();
+    let mut statuses = Vec::new();
+    stream_zip_wells(&path, 1, |batch| {
+        sizes.push(batch.len());
+        statuses.extend(
+            batch
+                .iter()
+                .map(|r| r.membership.status.as_db_str().to_owned()),
+        );
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(sizes, vec![1, 1]);
+    assert_eq!(statuses, vec!["included", "excluded_other_state"]);
+    std::fs::remove_file(path).unwrap();
+}
+
 #[tokio::test]
 async fn zip_fallback_import_stages_and_classifies_rows() {
     let server = MockServer::start().await;

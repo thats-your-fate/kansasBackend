@@ -50,7 +50,7 @@ def rows(statement, timeout=120):
 
 
 def cli(*args, timeout=7200):
-    env = dict(os.environ, KS_DB_MAX_CONNECTIONS='1', RUST_LOG='warn')
+    env = dict(os.environ, KS_DB_MAX_CONNECTIONS='2', RUST_LOG='warn')
     result = subprocess.run([str(ROOT / 'target/release/ks_ingest'), *map(str, args)],
                             cwd=ROOT, env=env, capture_output=True, text=True, timeout=timeout)
     if result.returncode:

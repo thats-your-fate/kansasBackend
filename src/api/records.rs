@@ -119,7 +119,7 @@ pub async fn production(
     }
     // Verified lease relationships are context, never divide a lease volume by
     // its well count or duplicate it into individual-well production records.
-    let predicate = r#"p.record_kind='monthly' AND make_date(p.year,p.month,1)>='2025-06-01'::date
+    let predicate = r#"p.record_kind='monthly' AND make_date(p.year,p.month,1)>='2025-01-01'::date
       AND r.status='completed' AND r.parser_version='kgs_production_zip-v1'
       AND r.source_url LIKE 'https://www.kgs.ku.edu/PRS/Ora_Archive/%'
       AND ($1::text IS NULL OR EXISTS(SELECT 1 FROM ks_well_lease_link l JOIN ks_well w ON w.internal_well_id=l.well_id

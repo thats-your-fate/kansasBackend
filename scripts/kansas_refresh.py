@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Native current-source refresh and June-2025-forward production publication."""
+"""Native current-source refresh and 2025-forward production publication."""
 import argparse
 from datetime import date, datetime, timezone
 import fcntl
@@ -72,7 +72,7 @@ def main():
     load_env()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('dataset', choices=['production', 'wells'])
-    parser.add_argument('--since', default=os.environ.get('KS_PRODUCTION_SINCE', '2025-06-01'))
+    parser.add_argument('--since', default=os.environ.get('KS_PRODUCTION_SINCE', '2025-01-01'))
     args = parser.parse_args()
     since = date.fromisoformat(args.since)
     if since.day != 1 or since.year < 1990 or since > date.today():

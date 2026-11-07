@@ -9,7 +9,7 @@ source metadata or logs.
 
 `scripts/kansas_refresh.py production` fetches only the two current 2020-present
 KGS partitions through `ks_ingest snapshot-production --current`. It publishes
-monthly records from **2025-06-01** using the native materializer's `--since`
+monthly records from **2025-01-01** using the native materializer's `--since`
 filter. Original immutable staged rows remain available. Baseline materialization
 upserts and removes absent facts in one statement per source partition. The
 worker refuses a missing month, a >10% count drop or test-sized source, then
@@ -63,11 +63,11 @@ targeted verification. Daily source changes need no manual document matching.
 
 ## Export and deployment
 
-`state-export-v1 full --exclude-test-ingestion --production-since 2025-06-01`
+`state-export-v1 full --exclude-test-ingestion --production-since 2025-01-01`
 includes public R2 documents, safe structured date/identity metadata, event
 evidence links and scoped monthly production. Remove the old
 `KS_EXPORT_PRODUCTION_YEAR=2026` limit from export service configuration. Set
-`KS_EXPORT_PRODUCTION_SINCE=2025-06-01` instead. Full exports still include every
+`KS_EXPORT_PRODUCTION_SINCE=2025-01-01` instead. Full exports still include every
 contract entity and stable source keys. Private PDF text is never exported.
 
 After building/restarting the Kansas API (which applies migration 0032), install:

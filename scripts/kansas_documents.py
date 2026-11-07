@@ -142,13 +142,13 @@ class NoRedirect(HTTPRedirectHandler):
         raise ValueError('source redirect requires review')
 
 
-def fetch(url, maximum):
+def fetch(url, maximum, referer=None):
     # Known page/PDF hosts only. Never follow a source link into a login library.
     if not (url.startswith(DETAIL) and url[len(DETAIL):].isdigit()) and not allowed_pdf(url):
         raise ValueError('unapproved source URL')
     for attempt in range(3):
         try:
-            with build_opener(NoRedirect).open(Request(url, headers={'User-Agent': 'FutureWells-Kansas-PublicRecords/1.0'}), timeout=30) as r:
+            with build_opener(NoRedirect).open(Request(url, headers={'User-Agent': 'FutureWells-Kansas-PublicRecords/1.0', 'Referer': referer or 'https://www.kgs.ku.edu/Magellan/Qualified/kid.html'}), timeout=30) as r:
                 content = r.read(maximum + 1)
                 if len(content) > maximum:
                     raise ValueError('source response too large')
@@ -308,7 +308,7 @@ def process(well, storage, since, recheck=False):
         if (known and not recheck and known[0]['filing_date'] == item['received']
                 and known[0]['document_type_raw'] == item['label']):
             continue
-        pdf = fetch(item['url'], MAX_PDF)
+        pdf = fetch(item['url'], MAX_PDF, DETAIL + well['kgs_kid'])
         if not pdf.startswith(b'%PDF-') or b'%%EOF' not in pdf[-4096:]:
             raise ValueError('source is not a complete PDF')
         with tempfile.TemporaryDirectory(prefix='ks-pdf-') as temp:
@@ -341,6 +341,7 @@ def main():
     parser.add_argument('--since', default=os.environ.get('KS_DOCUMENTS_SINCE', '2025-01-01'))
     parser.add_argument('--limit', type=int, default=int(os.environ.get('KS_DOCUMENTS_LIMIT', '2000')))
     parser.add_argument('--kid', action='append', help='Explicit source KID for a targeted normal ingestion run')
+    parser.add_argument('--retry-failed', action='store_true', help='Recheck failed pages after a source/parser repair')
     parser.add_argument('--recheck', action='store_true', help='Download and verify unchanged source URLs too')
     args = parser.parse_args()
     since = date.fromisoformat(args.since)
@@ -355,12 +356,14 @@ def main():
         conditions = ('AND w.kgs_kid IN (' + ','.join(sql(k) for k in args.kid) + ')') if args.kid else """
           AND (s.well_id IS NULL OR s.checked_at < now()-interval '7 days'
             OR (s.error IS NOT NULL AND s.checked_at < now()-interval '1 day'))"""
+        if args.retry_failed and not args.kid:
+            conditions = "AND s.error IS NOT NULL"
         wells = rows(f"""SELECT w.internal_well_id AS id,w.api14,w.kgs_kid,s.checked_at
           FROM ks_well w JOIN ks_ingestion_run r ON r.id=w.source_ingestion_run_id
           LEFT JOIN ks_document_scan s ON s.well_id=w.internal_well_id
           WHERE NOT w.is_tombstoned AND w.api14 ~ '^15[0-9]{{12}}$' AND w.kgs_kid ~ '^[0-9]+$'
            AND r.status='completed' AND r.row_count>100000 {conditions}
-          ORDER BY CASE WHEN greatest(w.permit_date,w.completion_date,w.plug_date)>={sql(since)}::date THEN 0 ELSE 1 END,
+          ORDER BY CASE WHEN greatest(w.permit_date,w.completion_date,w.plug_date) BETWEEN {sql(since)}::date AND CURRENT_DATE THEN 0 ELSE 1 END,
             s.checked_at ASC NULLS FIRST,greatest(w.permit_date,w.completion_date,w.plug_date) DESC NULLS LAST,w.api14
           LIMIT {args.limit}""")
         report = dict(started_at=datetime.now(timezone.utc).isoformat(), since=str(since), pipeline_version=VERSION,

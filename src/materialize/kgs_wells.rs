@@ -7,6 +7,7 @@
 //! this run, subject to baseline-backfill suppression.
 
 use chrono::{DateTime, NaiveDate, Utc};
+use futures_util::TryStreamExt;
 use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -289,30 +290,21 @@ pub async fn materialize_wells_from_run(
         return Err(MaterializeError::RunNotCompleted(ingestion_run_id, status));
     }
 
-    let rows: Vec<RawSnapshotRow> = sqlx::query_as(
-        r#"
-        SELECT source_object_id, source_format, raw_data, geometry_source_x, geometry_source_y
-        FROM ks_well_raw_snapshot
-        WHERE ingestion_run_id = $1 AND kansas_membership_status = 'included'
-        "#,
-    )
-    .bind(ingestion_run_id)
-    .fetch_all(pool)
-    .await?;
-
-    let source_format = rows
-        .first()
-        .map(|r| r.source_format.clone())
-        .unwrap_or_else(|| "arcgis".to_string());
+    // A second bounded connection handles writes while the source cursor streams.
+    let mut rows = sqlx::query_as::<_,RawSnapshotRow>(
+        "SELECT source_object_id,source_format,raw_data,geometry_source_x,geometry_source_y FROM ks_well_raw_snapshot WHERE ingestion_run_id=$1 AND kansas_membership_status='included'"
+    ).bind(ingestion_run_id).fetch(pool);
+    let mut source_format = "arcgis".to_owned();
 
     let (is_baseline_backfill, force_historical) =
         ingestion_run::event_policy(pool, ingestion_run_id).await?;
     let cutoff = constants::live_monitoring_cutoff();
 
     let mut outcome = MaterializeOutcome::default();
-    let mut touched_well_ids: Vec<Uuid> = Vec::with_capacity(rows.len());
+    let mut touched_well_ids: Vec<Uuid> = Vec::new();
 
-    for row in &rows {
+    while let Some(row) = rows.try_next().await? {
+        source_format = row.source_format.clone();
         let fields = extract_fields(
             &row.source_format,
             &row.raw_data,
@@ -491,6 +483,7 @@ pub async fn materialize_wells_from_run(
         touched_well_ids.push(well_id);
     }
 
+    drop(rows);
     let missing_wells: Vec<(Uuid, i32, bool)> = sqlx::query_as(
         r#"
         SELECT internal_well_id, consecutive_missing_snapshot_count, is_tombstoned

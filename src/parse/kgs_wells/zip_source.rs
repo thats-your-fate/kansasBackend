@@ -14,7 +14,6 @@
 //! branch on `source_format`.
 
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::Path;
 
 use futures_util::StreamExt;
@@ -92,37 +91,51 @@ pub async fn download_zip(
 /// synchronously (the `zip`/`csv` crates are blocking) — call via
 /// `tokio::task::spawn_blocking`.
 pub fn parse_zip_wells(path: &Path) -> Result<Vec<StagedRow>, ZipImportError> {
+    let mut rows = Vec::new();
+    stream_zip_wells(path, 2000, |batch| {
+        rows.extend(batch);
+        Ok(())
+    })?;
+    Ok(rows)
+}
+
+/// Bounded production path: never buffer the archive or the full well inventory.
+pub fn stream_zip_wells<F>(
+    path: &Path,
+    batch_size: usize,
+    mut on_batch: F,
+) -> Result<(), ZipImportError>
+where
+    F: FnMut(Vec<StagedRow>) -> Result<(), ZipImportError>,
+{
     let file = std::fs::File::open(path)?;
     let mut archive = zip::ZipArchive::new(file)?;
-
     if archive.len() != 1 {
         return Err(ZipImportError::UnexpectedArchiveShape(format!(
-            "{} entries (expected exactly 1)",
+            "{} entries",
             archive.len()
         )));
     }
-
-    let mut entry = archive.by_index(0)?;
-    let mut contents = String::new();
-    entry.read_to_string(&mut contents)?;
-    drop(entry);
-
+    let entry = archive.by_index(0)?;
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
-        .from_reader(contents.as_bytes());
+        .from_reader(entry);
     let headers = reader.headers()?.clone();
-    let column_index: HashMap<&str, usize> = headers
-        .iter()
-        .enumerate()
-        .map(|(i, name)| (name, i))
-        .collect();
-
-    let mut rows = Vec::new();
+    let index: HashMap<&str, usize> = headers.iter().enumerate().map(|(i, n)| (n, i)).collect();
+    let mut batch = Vec::with_capacity(batch_size);
     for record in reader.records() {
-        let record = record?;
-        rows.push(zip_record_to_staged_row(&record, &column_index));
+        batch.push(zip_record_to_staged_row(&record?, &index));
+        if batch.len() >= batch_size {
+            on_batch(std::mem::replace(
+                &mut batch,
+                Vec::with_capacity(batch_size),
+            ))?;
+        }
     }
-    Ok(rows)
+    if !batch.is_empty() {
+        on_batch(batch)?;
+    }
+    Ok(())
 }
 
 fn field<'a>(

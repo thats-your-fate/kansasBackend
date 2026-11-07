@@ -367,41 +367,46 @@ pub async fn run_zip_snapshot_import(
     .await?;
 
     let parse_path = downloaded.path.clone();
-    let rows =
-        match tokio::task::spawn_blocking(move || zip_source::parse_zip_wells(&parse_path)).await {
-            Ok(Ok(rows)) => rows,
-            Ok(Err(err)) => {
-                let _ = ingestion_run::fail_run(pool, run_id, &format!("zip parse failed: {err}"))
-                    .await;
-                return Err(err.into());
-            }
-            Err(join_err) => {
-                let _ = ingestion_run::fail_run(
-                    pool,
-                    run_id,
-                    &format!("zip parse task panicked: {join_err}"),
-                )
-                .await;
-                return Err(join_err.into());
-            }
-        };
-
-    let mut included_count: i64 = 0;
-    let mut excluded_count: i64 = 0;
-    for chunk in rows.chunks(2000) {
-        for row in chunk {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<StagedRow>>(2);
+    let parser = tokio::task::spawn_blocking(move || {
+        zip_source::stream_zip_wells(&parse_path, 1000, |batch| {
+            tx.blocking_send(batch).map_err(|_| {
+                zip_source::ZipImportError::Io(std::io::Error::other("staging receiver dropped"))
+            })
+        })
+    });
+    let mut included_count = 0_i64;
+    let mut excluded_count = 0_i64;
+    while let Some(batch) = rx.recv().await {
+        for row in &batch {
             match row.membership.status {
                 MembershipStatus::Included => included_count += 1,
                 MembershipStatus::ExcludedOtherState => excluded_count += 1,
             }
         }
-        persist_batch(pool, run_id, chunk).await?;
+        if let Err(error) = persist_batch(pool, run_id, &batch).await {
+            drop(rx);
+            let _ = parser.await;
+            let _ = ingestion_run::fail_run(pool, run_id, "well staging failed").await;
+            return Err(error.into());
+        }
+    }
+    match parser.await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            let _ = ingestion_run::fail_run(pool, run_id, "well ZIP parse failed").await;
+            return Err(error.into());
+        }
+        Err(error) => {
+            let _ = ingestion_run::fail_run(pool, run_id, "well parser stopped").await;
+            return Err(error.into());
+        }
     }
 
     let manifest = serde_json::json!({
         "content_length": downloaded.content_length,
         "last_modified": downloaded.last_modified,
-        "row_count": rows.len(),
+        "row_count": included_count+excluded_count,
         "included_count": included_count,
         "excluded_count": excluded_count,
     });
