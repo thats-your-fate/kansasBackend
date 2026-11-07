@@ -9,6 +9,8 @@ for dataset in documents production wells; do
     install -m 0644 "deploy/systemd/user/future-wells-ks-${dataset}.${kind}" "$HOME/.config/systemd/user/"
   done
 done
+install -d -m 0755 "$HOME/.config/systemd/user/future-wells-ks-export.service.d"
+install -m 0644 deploy/systemd/user/future-wells-ks-export.service.d/production.conf "$HOME/.config/systemd/user/future-wells-ks-export.service.d/production.conf"
 systemctl --user daemon-reload
 systemctl --user enable --now future-wells-ks-documents.timer future-wells-ks-production.timer future-wells-ks-wells.timer
 systemctl --user list-timers 'future-wells-ks-*' --no-pager
