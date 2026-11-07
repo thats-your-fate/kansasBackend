@@ -18,7 +18,7 @@ use future_wells_kansas::materialize::kgs_leases::{
     materialize_leases_from_run, unresolved_lease_apis_report,
 };
 use future_wells_kansas::materialize::kgs_production::{
-    coverage_summary, materialize_production_from_run_for_year, reconciliation_report,
+    coverage_summary, materialize_production_from_run_since, reconciliation_report,
     ReconciliationGrouping,
 };
 use future_wells_kansas::materialize::kgs_wells::{
@@ -70,6 +70,8 @@ enum Command {
     /// KS-03: run the KGS statewide well snapshot importer (ArcGIS preferred, ZIP fallback on
     /// resolve/metadata failure). Stages raw rows only — no normalization/materialization yet.
     SnapshotWells {
+        #[arg(long)]
+        zip: bool,
         /// Testing/ops escape hatch: caps how many object IDs are processed via the ArcGIS path.
         /// Omit for a real full run.
         #[arg(long)]
@@ -166,13 +168,19 @@ enum Command {
     },
     /// KS-10: import all 8 configured KGS monthly lease-production decade archives
     /// (oil/gas x 2020-present/2010-2019/2000-2009/1990-1999). Confirmed live 2026-09-05.
-    SnapshotProduction,
+    SnapshotProduction {
+        /// Refresh just the oil/gas 2020-present source partitions.
+        #[arg(long)]
+        current: bool,
+    },
     /// KS-10: materialize a completed snapshot-production run into ks_lease_production_month.
     MaterializeProduction {
         run_id: Uuid,
         /// Process only this reporting year from the staged archive.
         #[arg(long, value_parser = clap::value_parser!(i32).range(1990..=9999))]
         year: Option<i32>,
+        #[arg(long)]
+        since: Option<chrono::NaiveDate>,
     },
     /// KS-10: print latest_oil_month/latest_gas_month/last_successful_import coverage metadata.
     ProductionCoverageReport,
@@ -260,6 +268,8 @@ enum StateExportV1Command {
         /// Export monthly production only for this reporting year.
         #[arg(long, env = "KS_EXPORT_PRODUCTION_YEAR", value_parser = clap::value_parser!(i32).range(1990..=9999))]
         production_year: Option<i32>,
+        #[arg(long, env = "KS_EXPORT_PRODUCTION_SINCE")]
+        production_since: Option<chrono::NaiveDate>,
         #[arg(long)]
         json: bool,
     },
@@ -392,6 +402,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::SnapshotWells {
+            zip,
             limit_object_ids,
             count_tolerance_ratio,
         } => {
@@ -403,6 +414,28 @@ async fn main() -> anyhow::Result<()> {
                 retry_policy,
                 limit_object_ids,
             };
+
+            if zip {
+                anyhow::ensure!(
+                    limit_object_ids.is_none(),
+                    "--zip cannot be combined with --limit-object-ids"
+                );
+                let dest = std::env::temp_dir().join("ks_wells_snapshot.zip");
+                let outcome = run_zip_snapshot_import(
+                    &pool,
+                    &client,
+                    &cfg.source_urls.kgs_wells_static_zip,
+                    &dest,
+                    retry_policy,
+                )
+                .await?;
+                print_outcome("zip", &outcome);
+                anyhow::ensure!(
+                    outcome.status != ImportStatus::Rejected,
+                    "well snapshot rejected"
+                );
+                return Ok(());
+            }
 
             let item_id = &cfg.source_urls.kgs_wells_arcgis_item_id;
             let arcgis_layer = match arcgis::resolve_service_url(item_id).await {
@@ -683,7 +716,7 @@ async fn main() -> anyhow::Result<()> {
                 println!("{}  {}", entry.created_at, entry.raw_data);
             }
         }
-        Command::SnapshotProduction => {
+        Command::SnapshotProduction { current } => {
             let pool = db::connect(&cfg.database_url).await?;
             let client = reqwest::Client::new();
             let dest_dir = std::env::temp_dir();
@@ -691,14 +724,32 @@ async fn main() -> anyhow::Result<()> {
                 legal_review_override_enabled: cfg.pre_1990_legal_review_override_enabled,
                 ..Default::default()
             };
-            let results = run_all_production_files(
-                &pool,
-                &client,
-                &cfg.source_urls.kgs_production_archive_base,
-                &dest_dir,
-                options,
-            )
-            .await;
+            let results = if current {
+                let mut results = Vec::new();
+                for filename in constants::KGS_PRODUCTION_FILES.iter().take(2) {
+                    let url = format!("{}{filename}", cfg.source_urls.kgs_production_archive_base);
+                    let outcome = kgs_production::run_single_file_import(
+                        &pool,
+                        &client,
+                        &url,
+                        filename,
+                        &dest_dir.join(filename),
+                        options,
+                    )
+                    .await;
+                    results.push((*filename, outcome));
+                }
+                results
+            } else {
+                run_all_production_files(
+                    &pool,
+                    &client,
+                    &cfg.source_urls.kgs_production_archive_base,
+                    &dest_dir,
+                    options,
+                )
+                .await
+            };
             let mut any_failed = false;
             for (filename, result) in results {
                 match result {
@@ -721,9 +772,13 @@ async fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         }
-        Command::MaterializeProduction { run_id, year } => {
+        Command::MaterializeProduction {
+            run_id,
+            year,
+            since,
+        } => {
             let pool = db::connect(&cfg.database_url).await?;
-            let outcome = materialize_production_from_run_for_year(&pool, run_id, year).await?;
+            let outcome = materialize_production_from_run_since(&pool, run_id, year, since).await?;
             println!("created: {}", outcome.created);
             println!("updated: {}", outcome.updated);
             println!("skipped_unmapped_month: {}", outcome.skipped_unmapped_month);
@@ -1019,6 +1074,7 @@ async fn run_state_export_v1(cfg: &Config, command: StateExportV1Command) -> any
             compression_level,
             exclude_test_ingestion,
             production_year,
+            production_since,
             json,
         } => {
             let pool = db::connect(&cfg.database_url).await?;
@@ -1054,6 +1110,7 @@ async fn run_state_export_v1(cfg: &Config, command: StateExportV1Command) -> any
                 compression,
                 compression_level,
                 production_year,
+                production_since,
             };
             let summary = state_export::export_state_v1(&pool, ExportModeV1::Full, options).await?;
             if json {
@@ -1086,6 +1143,7 @@ async fn run_state_export_v1(cfg: &Config, command: StateExportV1Command) -> any
                         "elapsed_ms": summary.elapsed.as_millis(),
                         "records_by_entity": records_by_entity,
                         "production_year": production_year,
+                        "production_since": production_since,
                     }))?
                 );
             } else {

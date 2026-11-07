@@ -26,10 +26,8 @@
 //!   `WellV1.surface_latitude/surface_longitude` directly, which is all the
 //!   shared map's point layer reads (confirmed against `futureBackend`'s
 //!   own `map.rs` before writing this module).
-//! - `documents` / `document_contents` / `event_document_links`: Kansas has
-//!   no document/PDF ingestion yet (that is separately-planned, still
-//!   three-digit "KS-011", not built) — these entity files are always
-//!   present (required by the contract for a full export) but empty.
+//! - Public, well-resolved R2 documents and their event links are exported.
+//!   Login-only references and private extracted text are excluded.
 //! - Yearly-total / starting-cumulative sentinel rows (`record_kind` other
 //!   than `'monthly'`) are never exported into `production_monthly` — the
 //!   shared entity's `production_month` is a real calendar date, and the
@@ -92,6 +90,7 @@ pub struct ExportOptions {
     pub compression_level: i32,
     /// Include monthly production only for this reporting year, when specified.
     pub production_year: Option<i32>,
+    pub production_since: Option<NaiveDate>,
 }
 
 impl Default for ExportOptions {
@@ -104,6 +103,7 @@ impl Default for ExportOptions {
             compression: Compression::Zstd,
             compression_level: 3,
             production_year: None,
+            production_since: None,
         }
     }
 }
@@ -338,15 +338,24 @@ async fn export_entity(
         "wells" => export_wells(pool, &mut writer, None).await?,
         "well_identifiers" => export_well_identifiers(pool, &mut writer).await?,
         "wellbores" => export_wellbores(pool, &mut writer).await?,
-        "wellbore_geometries"
-        | "well_geometries"
-        | "documents"
-        | "document_contents"
-        | "event_document_links" => 0,
+        "wellbore_geometries" | "well_geometries" => 0,
+        "documents" => export_document_entities(pool, &mut writer, "documents").await?,
+        "document_contents" => {
+            export_document_entities(pool, &mut writer, "document_contents").await?
+        }
+        "event_document_links" => {
+            export_document_entities(pool, &mut writer, "event_document_links").await?
+        }
         "regulatory_records" => export_regulatory_records(pool, &mut writer).await?,
         "events" => export_events(pool, &mut writer).await?,
         "production_monthly" => {
-            export_production_monthly(pool, &mut writer, options.production_year).await?
+            export_production_monthly(
+                pool,
+                &mut writer,
+                options.production_year,
+                options.production_since,
+            )
+            .await?
         }
         "tombstones" => export_tombstones(pool, &mut writer).await?,
         other => bail!("unknown entity type {other}"),
@@ -978,10 +987,76 @@ async fn export_events(pool: &PgPool, writer: &mut EntityPartWriter) -> Result<u
     Ok(count)
 }
 
+/// Only real public PDFs with a current, verified R2 version can cross the
+/// state boundary. Text stays private; structured content carries dates and
+/// exact identifier evidence only.
+async fn export_document_entities(
+    pool: &PgPool,
+    writer: &mut EntityPartWriter,
+    entity: &str,
+) -> Result<u64> {
+    let select = match entity {
+        "documents" => {
+            r#"SELECT jsonb_build_object(
+          'source_key','ks:document:'||d.id,'source_updated_at',d.updated_at,
+          'source_payload',v.source_metadata || jsonb_build_object('registered_at',d.first_observed_at,'stored_at',d.stored_at),
+          'well_source_key','ks:well:'||d.well_id,'document_type',d.document_type,'title',d.document_type_raw,
+          'document_number',d.source_document_id,'filing_date',d.filing_date,'effective_date',d.effective_date,
+          'source_url',d.source_url,'object_storage_key',d.content_object_storage_key,'mime_type','application/pdf',
+          'content_checksum',d.content_hash,'page_count',d.page_count,'relationship_resolution_status','resolved') AS record"#
+        }
+        "document_contents" => {
+            r#"SELECT jsonb_build_object(
+          'source_key','ks:document_content:'||v.id,'source_payload',jsonb_build_object('version_id',v.id),
+          'document_source_key','ks:document:'||d.id,'content_type','source_metadata',
+          'structured_content',v.source_metadata,'content_checksum',v.content_hash,'extraction_version','kgs-public-pdf-v1') AS record"#
+        }
+        "event_document_links" => {
+            r#"SELECT jsonb_build_object(
+          'source_key','ks:event_document_link:'||l.event_id||':'||d.id,'source_payload',jsonb_build_object('version_id',l.version_id),
+          'event_source_key','ks:event:'||l.event_id,'document_source_key','ks:document:'||d.id,
+          'relation_type','source_document','relationship_resolution_status','resolved') AS record"#
+        }
+        _ => bail!("unsupported document entity"),
+    };
+    let extra = if entity == "event_document_links" {
+        "JOIN ks_document_event_link l ON l.document_id=d.id JOIN ks_event e ON e.id=l.event_id"
+    } else {
+        ""
+    };
+    let statement = format!(
+        r#"{select}
+      FROM ks_well_document d JOIN ks_document_version v ON v.id=d.current_version_id AND v.document_id=d.id
+      JOIN ks_well w ON w.internal_well_id=d.well_id
+      JOIN ks_ingestion_run r ON r.id=d.source_ingestion_run_id {extra}
+      WHERE d.public_access_state='public' AND d.content_object_storage_key IS NOT NULL
+        AND NOT w.is_tombstoned AND r.status='completed' AND r.parser_version='kgs-public-pdf-v1'
+      ORDER BY d.id {}"#,
+        if entity == "event_document_links" {
+            ",l.event_id"
+        } else {
+            ""
+        }
+    );
+    let mut records = sqlx::query_scalar::<_, Value>(&statement).fetch(pool);
+    let mut count = 0;
+    while let Some(record) = records.try_next().await? {
+        let key = record["source_key"]
+            .as_str()
+            .context("missing document export key")?;
+        crate::privacy::assert_no_forbidden_fields(&record)
+            .map_err(|fields| anyhow::anyhow!("forbidden document fields: {fields:?}"))?;
+        writer.push(key, &record)?;
+        count += 1;
+    }
+    Ok(count)
+}
+
 async fn export_production_monthly(
     pool: &PgPool,
     writer: &mut EntityPartWriter,
     year: Option<i32>,
+    since: Option<NaiveDate>,
 ) -> Result<u64> {
     let mut rows = sqlx::query(
         r#"
@@ -992,10 +1067,12 @@ async fn export_production_monthly(
         FROM ks_lease_production_month
         WHERE record_kind = 'monthly'
           AND ($1::integer IS NULL OR year = $1)
+          AND ($2::date IS NULL OR make_date(year,month,1)>=$2)
         ORDER BY id
         "#,
     )
     .bind(year)
+    .bind(since)
     .fetch(pool);
 
     let mut count = 0_u64;

@@ -14,7 +14,7 @@ cargo run --bin ks_ingest -- sources  # list the official source registry
 cargo test
 ```
 
-Requires Postgres with the `postgis` and `pg_trgm` extensions available (a disposable dev instance: `podman run -e POSTGRES_PASSWORD=changeme -p 5432:5432 postgis/postgis:16-3.4`).
+Requires native PostgreSQL with the `postgis` and `pg_trgm` extensions. Use native host services for development and deployment. See [native ingestion](docs/ops/kansas-native-ingestion.md) for current production/document jobs.
 
 ## Changelog
 

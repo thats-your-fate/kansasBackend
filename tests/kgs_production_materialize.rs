@@ -592,3 +592,97 @@ async fn backfill_run_suppresses_production_events_for_historical_months() {
             .unwrap();
     assert_eq!(materialized, 1);
 }
+
+#[tokio::test]
+async fn scoped_backfill_starts_in_june_and_replaces_removed_source_rows() {
+    use future_wells_kansas::materialize::kgs_production::materialize_production_from_run_since;
+    let pool = test_pool().await;
+    let lease = format!("scoped-{}", Uuid::new_v4());
+    let old = stage_run(
+        &pool,
+        "KGS_PRODUCTION_OIL",
+        &[
+            RawProdRow {
+                lease_kid: &lease,
+                county: None,
+                field_name: None,
+                year: 2025,
+                month: 5,
+                product_raw: "O",
+                production_volume: 10.0,
+            },
+            RawProdRow {
+                lease_kid: &lease,
+                county: None,
+                field_name: None,
+                year: 2025,
+                month: 6,
+                product_raw: "O",
+                production_volume: 20.0,
+            },
+            RawProdRow {
+                lease_kid: &lease,
+                county: None,
+                field_name: None,
+                year: 2025,
+                month: 7,
+                product_raw: "O",
+                production_volume: 30.0,
+            },
+        ],
+    )
+    .await;
+    let url = format!(
+        "https://www.kgs.ku.edu/PRS/Ora_Archive/test-{}.zip",
+        Uuid::new_v4()
+    );
+    sqlx::query("UPDATE ks_ingestion_run SET source_url=$2 WHERE id=$1")
+        .bind(old)
+        .bind(&url)
+        .execute(&pool)
+        .await
+        .unwrap();
+    ingestion_run::mark_as_backfill(&pool, old).await.unwrap();
+    let since = chrono::NaiveDate::from_ymd_opt(2025, 6, 1);
+    materialize_production_from_run_since(&pool, old, None, since)
+        .await
+        .unwrap();
+    let months: Vec<i16> = sqlx::query_scalar(
+        "SELECT month FROM ks_lease_production_month WHERE lease_kid=$1 ORDER BY month",
+    )
+    .bind(&lease)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(months, vec![6, 7]);
+    let new = stage_run(
+        &pool,
+        "KGS_PRODUCTION_OIL",
+        &[RawProdRow {
+            lease_kid: &lease,
+            county: None,
+            field_name: None,
+            year: 2025,
+            month: 6,
+            product_raw: "O",
+            production_volume: 21.0,
+        }],
+    )
+    .await;
+    sqlx::query("UPDATE ks_ingestion_run SET source_url=$2 WHERE id=$1")
+        .bind(new)
+        .bind(&url)
+        .execute(&pool)
+        .await
+        .unwrap();
+    ingestion_run::mark_as_backfill(&pool, new).await.unwrap();
+    materialize_production_from_run_since(&pool, new, None, since)
+        .await
+        .unwrap();
+    materialize_production_from_run_since(&pool, new, None, since)
+        .await
+        .unwrap();
+    let values:Vec<(i16,f64)>=sqlx::query_as("SELECT month,production_volume FROM ks_lease_production_month WHERE lease_kid=$1 ORDER BY month")
+        .bind(&lease).fetch_all(&pool).await.unwrap();
+    assert_eq!(values, vec![(6, 21.0)]);
+}

@@ -2,6 +2,7 @@ pub mod browse;
 pub mod envelope;
 pub mod error;
 pub mod health;
+pub mod records;
 pub mod seo;
 pub mod state;
 
@@ -18,7 +19,10 @@ use state::AppState;
 /// underlying table is materialized from a validated source.
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/api/ks/production", get(records::production))
+        .route("/api/ks/documents/:id/download", get(records::download))
         .route("/api/ks/browse", get(browse::start))
+        .route("/api/ks/wells/map", get(browse::map_wells))
         .route("/api/ks/wells/:api", get(browse::well_detail))
         .route("/api/ks/counties", get(browse::county_directory))
         .route("/api/ks/counties/:slug", get(browse::county_detail))

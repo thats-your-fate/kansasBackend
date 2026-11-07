@@ -12,7 +12,7 @@ BEGIN
     FOREACH table_name IN ARRAY ARRAY[
         'ks_well', 'ks_operator', 'ks_field', 'ks_lease',
         'ks_lease_production_month', 'ks_event', 'ks_drilling_intent',
-        'ks_operator_transfer'
+        'ks_operator_transfer', 'ks_well_document'
     ] LOOP
         projection := 't.*';
         IF table_name = 'ks_well' THEN

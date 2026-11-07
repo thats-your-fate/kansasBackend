@@ -15,6 +15,8 @@ const SUMMARY_LIMIT: i64 = 8;
 const ACTIVITY_LIMIT: i64 = 8;
 const DIRECTORY_DEFAULT_PAGE_SIZE: i64 = 50;
 const DIRECTORY_MAX_PAGE_SIZE: i64 = 100;
+const MAP_DEFAULT_LIMIT: i64 = 50_000;
+const MAP_MAX_LIMIT: i64 = 75_000;
 
 #[derive(Debug, Serialize)]
 pub struct BrowseStartPage {
@@ -65,11 +67,14 @@ pub struct BrowseEntityDetail {
 pub struct BrowseWellDetail {
     pub well: BrowseWellCard,
     pub related_wells: Vec<BrowseWellCard>,
+    pub documents: Vec<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct BrowseWellCard {
     pub id: Uuid,
+    pub document_count: i64,
+    pub latest_filing_date: Option<chrono::NaiveDate>,
     pub api14: Option<String>,
     pub api_raw: Option<String>,
     pub kgs_kid: Option<String>,
@@ -135,9 +140,58 @@ pub struct BrowseActivityEvent {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct MapWellsQuery {
+    pub west: f64,
+    pub south: f64,
+    pub east: f64,
+    pub north: f64,
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct DirectoryQuery {
     pub page: Option<i64>,
     pub page_size: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MapFeatureCollection {
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub features: Vec<MapFeature>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MapFeature {
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub geometry: MapPointGeometry,
+    pub properties: MapWellProperties,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MapPointGeometry {
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub coordinates: [f64; 2],
+}
+
+#[derive(Debug, Serialize)]
+pub struct MapWellProperties {
+    pub id: Uuid,
+    pub api14: Option<String>,
+    pub api_raw: Option<String>,
+    pub kgs_kid: Option<String>,
+    pub title: String,
+    pub county: Option<String>,
+    pub operator: Option<String>,
+    pub field_name: Option<String>,
+    pub lease_name: Option<String>,
+    pub lifecycle_status: Option<String>,
+    pub status: String,
+    pub status_label: String,
+    pub href: String,
+    pub last_seen_at: Option<DateTime<Utc>>,
 }
 
 pub async fn start(
@@ -172,6 +226,85 @@ pub async fn start(
         },
         meta,
     )))
+}
+
+pub async fn map_wells(
+    State(state): State<AppState>,
+    Query(query): Query<MapWellsQuery>,
+) -> Result<Json<MapFeatureCollection>, ApiError> {
+    if !query.west.is_finite()
+        || !query.south.is_finite()
+        || !query.east.is_finite()
+        || !query.north.is_finite()
+        || query.west >= query.east
+        || query.south >= query.north
+    {
+        return Err(ApiError::bad_request("invalid map bounds"));
+    }
+
+    let west = query.west.max(-102.1);
+    let south = query.south.max(36.9);
+    let east = query.east.min(-94.5);
+    let north = query.north.min(40.1);
+    if west >= east || south >= north {
+        return Ok(Json(MapFeatureCollection {
+            kind: "FeatureCollection",
+            features: Vec::new(),
+        }));
+    }
+
+    let limit = query
+        .limit
+        .unwrap_or(MAP_DEFAULT_LIMIT)
+        .clamp(1, MAP_MAX_LIMIT);
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            internal_well_id AS id,
+            api14,
+            api_raw,
+            kgs_kid,
+            well_name,
+            county,
+            COALESCE(NULLIF(btrim(operator_name_kgs_reported_current), ''), NULLIF(btrim(operator_name_kgs_original), '')) AS operator,
+            field_name,
+            lease_name,
+            lifecycle_status,
+            source_latitude,
+            source_longitude,
+            last_seen_at,
+            (SELECT count(*) FROM ks_well_document d WHERE d.well_id=ks_well.internal_well_id
+              AND d.public_access_state='public' AND d.current_version_id IS NOT NULL) AS document_count,
+            (SELECT max(d.filing_date) FROM ks_well_document d WHERE d.well_id=ks_well.internal_well_id
+              AND d.public_access_state='public' AND d.current_version_id IS NOT NULL) AS latest_filing_date
+        FROM ks_well
+        WHERE is_tombstoned = false
+          AND source_latitude IS NOT NULL
+          AND source_longitude IS NOT NULL
+          AND source_longitude BETWEEN $1 AND $3
+          AND source_latitude BETWEEN $2 AND $4
+        ORDER BY source_longitude ASC, source_latitude ASC, api14 ASC NULLS LAST
+        LIMIT $5
+        "#,
+    )
+    .bind(west)
+    .bind(south)
+    .bind(east)
+    .bind(north)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let features = rows
+        .into_iter()
+        .filter_map(map_feature_from_row)
+        .collect::<Vec<_>>();
+
+    Ok(Json(MapFeatureCollection {
+        kind: "FeatureCollection",
+        features,
+    }))
 }
 
 pub async fn county_detail(
@@ -235,6 +368,7 @@ pub async fn well_detail(
     };
     Ok(Json(Envelope::new(
         BrowseWellDetail {
+            documents: super::records::documents_for_well(&state.pool, well.id).await?,
             well,
             related_wells,
         },
@@ -767,11 +901,18 @@ async fn entity_wells(
             source_format,
             source_object_id,
             first_seen_at,
-            last_seen_at
+            last_seen_at,
+            (SELECT count(*) FROM ks_well_document d WHERE d.well_id=ks_well.internal_well_id
+              AND d.public_access_state='public' AND d.current_version_id IS NOT NULL) AS document_count,
+            (SELECT max(d.filing_date) FROM ks_well_document d WHERE d.well_id=ks_well.internal_well_id
+              AND d.public_access_state='public' AND d.current_version_id IS NOT NULL) AS latest_filing_date
         FROM ks_well
         WHERE {entity_where}
           AND ($2::uuid IS NULL OR internal_well_id <> $2)
         ORDER BY
+            (SELECT count(*) FROM ks_well_document d WHERE d.well_id=ks_well.internal_well_id
+              AND d.public_access_state='public' AND d.current_version_id IS NOT NULL)>0 DESC,
+            latest_filing_date DESC NULLS LAST,
             CASE WHEN lifecycle_status IN ('planned', 'producing') THEN 0 ELSE 1 END,
             CASE WHEN COALESCE(permit_date, completion_date, spud_date, plug_date) IS NULL THEN 1 ELSE 0 END,
             COALESCE(permit_date, completion_date, spud_date, plug_date, last_seen_at::date) DESC NULLS LAST,
@@ -847,12 +988,19 @@ async fn entity_wells_by_group(
             source_format,
             source_object_id,
             first_seen_at,
-            last_seen_at
+            last_seen_at,
+            (SELECT count(*) FROM ks_well_document d WHERE d.well_id=ks_well.internal_well_id
+              AND d.public_access_state='public' AND d.current_version_id IS NOT NULL) AS document_count,
+            (SELECT max(d.filing_date) FROM ks_well_document d WHERE d.well_id=ks_well.internal_well_id
+              AND d.public_access_state='public' AND d.current_version_id IS NOT NULL) AS latest_filing_date
         FROM ks_well
         WHERE {entity_where}
           AND ($2::uuid IS NULL OR internal_well_id <> $2)
           AND {group_where}
         ORDER BY
+            (SELECT count(*) FROM ks_well_document d WHERE d.well_id=ks_well.internal_well_id
+              AND d.public_access_state='public' AND d.current_version_id IS NOT NULL)>0 DESC,
+            latest_filing_date DESC NULLS LAST,
             CASE WHEN {group_date} IS NULL THEN 1 ELSE 0 END,
             {group_date} DESC NULLS LAST,
             updated_at DESC,
@@ -883,8 +1031,10 @@ fn representative_wells(
         .cloned()
         .collect::<Vec<_>>();
     wells.sort_by(|left, right| {
-        well_activity_date(right)
-            .cmp(&well_activity_date(left))
+        (right.document_count > 0)
+            .cmp(&(left.document_count > 0))
+            .then_with(|| right.latest_filing_date.cmp(&left.latest_filing_date))
+            .then_with(|| well_activity_date(right).cmp(&well_activity_date(left)))
             .then_with(|| right.last_seen_at.cmp(&left.last_seen_at))
             .then_with(|| left.api14.cmp(&right.api14))
     });
@@ -954,7 +1104,11 @@ async fn load_well_detail(pool: &sqlx::PgPool, value: &str) -> Result<BrowseWell
             source_format,
             source_object_id,
             first_seen_at,
-            last_seen_at
+            last_seen_at,
+            (SELECT count(*) FROM ks_well_document d WHERE d.well_id=ks_well.internal_well_id
+              AND d.public_access_state='public' AND d.current_version_id IS NOT NULL) AS document_count,
+            (SELECT max(d.filing_date) FROM ks_well_document d WHERE d.well_id=ks_well.internal_well_id
+              AND d.public_access_state='public' AND d.current_version_id IS NOT NULL) AS latest_filing_date
         FROM ks_well
         WHERE is_tombstoned = false
           AND (
@@ -981,6 +1135,8 @@ async fn load_well_detail(pool: &sqlx::PgPool, value: &str) -> Result<BrowseWell
 
 fn well_card_from_row(row: sqlx::postgres::PgRow) -> BrowseWellCard {
     BrowseWellCard {
+        document_count: row.try_get("document_count").unwrap_or(0),
+        latest_filing_date: row.try_get("latest_filing_date").ok().flatten(),
         id: row.get("id"),
         api14: row.get("api14"),
         api_raw: row.get("api_raw"),
@@ -1028,6 +1184,139 @@ fn well_card_from_row(row: sqlx::postgres::PgRow) -> BrowseWellCard {
         first_seen_at: row.get("first_seen_at"),
         last_seen_at: row.get("last_seen_at"),
     }
+}
+
+fn map_feature_from_row(row: sqlx::postgres::PgRow) -> Option<MapFeature> {
+    let latitude: f64 = row.get("source_latitude");
+    let longitude: f64 = row.get("source_longitude");
+    if !latitude.is_finite() || !longitude.is_finite() {
+        return None;
+    }
+
+    let id: Uuid = row.get("id");
+    let api14: Option<String> = row.get("api14");
+    let api_raw: Option<String> = row.get("api_raw");
+    let kgs_kid: Option<String> = row.get("kgs_kid");
+    let well_name: Option<String> = row.get("well_name");
+    let lease_name: Option<String> = row.get("lease_name");
+    let lifecycle_status: Option<String> = row.get("lifecycle_status");
+    let title = title_case(
+        meaningful(well_name.as_deref())
+            .or_else(|| meaningful(lease_name.as_deref()))
+            .or(api14.as_deref())
+            .or(api_raw.as_deref())
+            .or(kgs_kid.as_deref())
+            .unwrap_or("Kansas well"),
+    );
+    let status = normalized_map_status(lifecycle_status.as_deref());
+    let status_label = lifecycle_status
+        .as_deref()
+        .map(status_label)
+        .unwrap_or_else(|| "Status not reported".to_string());
+    let href = well_path_for_parts(
+        api14
+            .as_deref()
+            .or(api_raw.as_deref())
+            .or(kgs_kid.as_deref())
+            .map(str::to_string)
+            .unwrap_or_else(|| id.to_string()),
+        well_name.as_deref().or(lease_name.as_deref()),
+    );
+
+    Some(MapFeature {
+        kind: "Feature",
+        geometry: MapPointGeometry {
+            kind: "Point",
+            coordinates: [longitude, latitude],
+        },
+        properties: MapWellProperties {
+            id,
+            api14,
+            api_raw,
+            kgs_kid,
+            title,
+            county: row.get("county"),
+            operator: row.get("operator"),
+            field_name: row.get("field_name"),
+            lease_name,
+            lifecycle_status,
+            status,
+            status_label,
+            href,
+            last_seen_at: row.get("last_seen_at"),
+        },
+    })
+}
+
+fn normalized_map_status(value: Option<&str>) -> String {
+    let status = value.unwrap_or("historical").to_ascii_lowercase();
+    if status == "planned" || status == "intent_expired" {
+        "permitted".to_string()
+    } else if ["producing", "completed", "plugged"].contains(&status.as_str()) {
+        status
+    } else if status.contains("shut") || status.contains("inactive") {
+        "shut_in".to_string()
+    } else {
+        "historical".to_string()
+    }
+}
+
+fn status_label(value: &str) -> String {
+    value
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => {
+                    first.to_uppercase().collect::<String>() + &chars.as_str().to_ascii_lowercase()
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn meaningful(value: Option<&str>) -> Option<&str> {
+    let cleaned = value.map(str::trim)?;
+    if cleaned.is_empty()
+        || ["unknown", "unavailable", "n/a", "na", "unnamed"]
+            .contains(&cleaned.to_ascii_lowercase().as_str())
+    {
+        None
+    } else {
+        Some(cleaned)
+    }
+}
+
+fn title_case(value: &str) -> String {
+    value
+        .split_whitespace()
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => {
+                    first.to_uppercase().collect::<String>() + &chars.as_str().to_ascii_lowercase()
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn well_path_for_parts(id: String, title: Option<&str>) -> String {
+    let suffix = slugify(title.unwrap_or("kansas-well"));
+    format!(
+        "/wells/{}{}",
+        id,
+        if suffix.is_empty() {
+            String::new()
+        } else {
+            format!("/{suffix}")
+        }
+    )
 }
 
 fn detail_meta() -> Meta {

@@ -8,6 +8,7 @@ WITH eligible AS MATERIALIZED (
  FROM ks_lease_production_raw_snapshot r LEFT JOIN ks_lease l ON l.lease_kid=r.lease_kid
  WHERE r.ingestion_run_id=$1 AND r.rejection_reason IS NULL AND r.lease_kid IS NOT NULL
  AND ($2::integer IS NULL OR r.year=$2)
+ AND ($3::date IS NULL OR (r.year,r.month)>=(extract(year FROM $3::date)::integer,extract(month FROM $3::date)::integer))
 ), upserted AS (
  INSERT INTO ks_lease_production_month(lease_id,lease_kid,reported_lease_name,dor_code,api_number_raw,
  field_name,producing_zone,operator,county,township,township_direction,range,range_direction,section,spot,
@@ -30,6 +31,15 @@ WITH eligible AS MATERIALIZED (
     OR ks_lease_production_month.source_ingestion_run_id IS DISTINCT FROM EXCLUDED.source_ingestion_run_id
     OR (EXCLUDED.lease_id IS NOT NULL AND ks_lease_production_month.lease_id IS DISTINCT FROM EXCLUDED.lease_id)
  RETURNING (xmax=0) AS was_inserted
+), removed AS (
+ DELETE FROM ks_lease_production_month p USING ks_ingestion_run prior
+ WHERE p.source_ingestion_run_id=prior.id
+   AND prior.source_url=(SELECT source_url FROM ks_ingestion_run WHERE id=$1)
+   AND ($2::integer IS NULL OR p.year=$2)
+   AND ($3::date IS NULL OR (p.year,p.month)>=(extract(year FROM $3::date)::integer,extract(month FROM $3::date)::integer))
+   AND EXISTS(SELECT 1 FROM eligible)
+   AND NOT EXISTS(SELECT 1 FROM eligible e WHERE e.lease_kid=p.lease_kid AND e.product=p.product AND e.year=p.year AND e.month=p.month)
+ RETURNING p.id
 )
 SELECT count(*) FILTER(WHERE was_inserted)::bigint AS created,
  (SELECT count(*) FROM eligible WHERE record_kind IS NOT NULL AND product IS NOT NULL)-count(*) FILTER(WHERE was_inserted) AS updated,

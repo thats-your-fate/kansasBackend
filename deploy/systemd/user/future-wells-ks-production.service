@@ -1,0 +1,19 @@
+[Unit]
+Description=Refresh Kansas monthly lease production
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/yaro/projects/kansasBackend
+EnvironmentFile=/home/yaro/projects/kansasBackend/.env
+Environment=KS_AWS_BIN=/home/yaro/projects/kansasBackend/.tools/bin/aws
+ExecStart=/usr/bin/python3 scripts/kansas_refresh.py production
+TimeoutStartSec=4h
+Nice=10
+CPUQuota=100%
+MemoryMax=1400M
+TasksMax=128
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true

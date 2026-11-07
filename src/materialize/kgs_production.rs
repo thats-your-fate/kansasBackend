@@ -86,6 +86,15 @@ pub async fn materialize_production_from_run_for_year(
     ingestion_run_id: Uuid,
     year: Option<i32>,
 ) -> Result<MaterializeOutcome, MaterializeError> {
+    materialize_production_from_run_since(pool, ingestion_run_id, year, None).await
+}
+
+pub async fn materialize_production_from_run_since(
+    pool: &PgPool,
+    ingestion_run_id: Uuid,
+    year: Option<i32>,
+    since: Option<chrono::NaiveDate>,
+) -> Result<MaterializeOutcome, MaterializeError> {
     let status: Option<String> =
         sqlx::query_scalar("SELECT status FROM ks_ingestion_run WHERE id = $1")
             .bind(ingestion_run_id)
@@ -107,6 +116,7 @@ pub async fn materialize_production_from_run_for_year(
         let counts = sqlx::query(include_str!("production_backfill.sql"))
             .bind(ingestion_run_id)
             .bind(year)
+            .bind(since)
             .fetch_one(pool)
             .await?;
         return Ok(MaterializeOutcome {
@@ -133,6 +143,7 @@ pub async fn materialize_production_from_run_for_year(
             WHERE ingestion_run_id = $1 AND lease_kid IS NOT NULL AND rejection_reason IS NULL
               AND ($2::uuid IS NULL OR id > $2)
               AND ($4::integer IS NULL OR year = $4)
+              AND ($5::date IS NULL OR (year,month) >= (extract(year FROM $5::date)::integer,extract(month FROM $5::date)::integer))
             ORDER BY id
             LIMIT $3
             "#,
@@ -141,6 +152,7 @@ pub async fn materialize_production_from_run_for_year(
         .bind(after_id)
         .bind(PAGE_SIZE)
         .bind(year)
+        .bind(since)
         .fetch_all(pool)
         .await?;
 
