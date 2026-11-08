@@ -14,6 +14,10 @@ systemd units are used. No container runtime is involved.
   resolved to their canonical wells/events on the shared host; zero failed rows.
 - Manifest SHA-256:
   `4eb78c1791d7903c01e924973dc374289245d70cdcc7f1122f0639f9f93a533c`.
+- Shared sync finished at 07:11:56 UTC: 782 batches, 300,567 inserted,
+  3,559,307 unchanged, zero failed. Source acknowledgement and target confirmation
+  both succeeded. Refreshed workspace summaries show 4,261 documents and 416,382
+  production rows, with latest document activity November 6.
 - Kansas production stays at lease level. Verified associations expose lease
   context to wells; volumes are never allocated or copied into individual wells.
   Shared API 15067202840000 has 18 linked lease months through June 2026.

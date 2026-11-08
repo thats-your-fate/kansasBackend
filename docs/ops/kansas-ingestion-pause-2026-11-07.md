@@ -1,5 +1,8 @@
 # Resume checkpoint — November 7, 2026
 
+Resumed November 8. This is the historical pause record; see
+`kansas-ingestion-live-2026-11-08.md` for current completion and background status.
+
 User paused interactive work until tomorrow, explicitly allowing ingestion jobs
 and timers to continue in the background. Do not disable scheduled ingestion.
 
