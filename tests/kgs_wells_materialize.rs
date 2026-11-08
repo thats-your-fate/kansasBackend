@@ -182,6 +182,36 @@ async fn materialize_creates_wells_from_a_completed_run() {
 
 #[serial]
 #[tokio::test]
+async fn zip_refresh_preserves_county_missing_from_the_zip_schema() {
+    let pool = test_pool().await;
+    let api = "15009234560000";
+    let attributes = well_attrs(
+        999_121,
+        api,
+        "15-009-23456",
+        "Active",
+        "Active",
+        "Active Oil Well",
+    );
+    let first = stage_completed_run(&pool, &[attributes.clone()]).await;
+    materialize_wells_from_run(&pool, first).await.unwrap();
+    let second = stage_completed_run(&pool, &[attributes]).await;
+    sqlx::query("UPDATE ks_well_raw_snapshot SET source_format='zip' WHERE ingestion_run_id=$1")
+        .bind(second)
+        .execute(&pool)
+        .await
+        .unwrap();
+    materialize_wells_from_run(&pool, second).await.unwrap();
+    let county: Option<String> = sqlx::query_scalar("SELECT county FROM ks_well WHERE api14=$1")
+        .bind(api)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(county.as_deref(), Some("Barton"));
+}
+
+#[serial]
+#[tokio::test]
 async fn materialize_refuses_a_non_completed_run() {
     let pool = test_pool().await;
     let source = registry::find_source_by_code(&pool, "KGS_WELLS_ARCGIS")

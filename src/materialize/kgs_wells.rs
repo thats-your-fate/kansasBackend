@@ -620,7 +620,10 @@ async fn upsert_well(
             lifecycle_status = EXCLUDED.lifecycle_status,
             operator_name_kgs_original = EXCLUDED.operator_name_kgs_original,
             operator_name_kgs_reported_current = EXCLUDED.operator_name_kgs_reported_current,
-            county = EXCLUDED.county, township = EXCLUDED.township, township_direction = EXCLUDED.township_direction,
+            -- The ZIP schema omits COUNTY; absence in that format is not a
+            -- correction to an existing county obtained from the full inventory.
+            county = CASE WHEN EXCLUDED.source_format='zip' THEN COALESCE(EXCLUDED.county,ks_well.county) ELSE EXCLUDED.county END,
+            township = EXCLUDED.township, township_direction = EXCLUDED.township_direction,
             range = EXCLUDED.range, range_direction = EXCLUDED.range_direction, section = EXCLUDED.section,
             subdivision_1_largest = EXCLUDED.subdivision_1_largest, subdivision_2 = EXCLUDED.subdivision_2,
             subdivision_3 = EXCLUDED.subdivision_3, subdivision_4_smallest = EXCLUDED.subdivision_4_smallest,
