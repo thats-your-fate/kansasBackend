@@ -1,0 +1,16 @@
+{
+  "checked_at": "2026-11-08T13:19:14.052Z",
+  "state": "KS",
+  "well_api": "15175001600001",
+  "reporting_level": "lease",
+  "source_rows": 18,
+  "lease_kid": "1001103041",
+  "before_api_seconds": 25.1,
+  "after_api_milliseconds": 1213,
+  "well_profile_http": 200,
+  "well_profile_milliseconds": 6908,
+  "charts_in_raw_html": true,
+  "grain_and_null_tests": "passed",
+  "backend_library_tests": 128,
+  "backend_pg_temp_fixture": "passed"
+}
