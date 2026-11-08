@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+exec 8>"${XDG_RUNTIME_DIR:?}/future-wells-native-build.lock"
+flock 8
 test "$(hostname -s)" = futurewells
 test "$(git branch --show-current)" = main
 test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
