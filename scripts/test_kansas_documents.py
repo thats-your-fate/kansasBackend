@@ -1,4 +1,9 @@
 import unittest
+import json
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
+import kansas_documents
 from kansas_documents import allowed_pdf, api14, classify, parse_page, effective_date
 
 URL = 'https://kgsimages.blob.core.windows.net/kolar/filer_3/public/2026-08/kolar_images.images.img/sid=1322168976.pdf'
@@ -55,6 +60,22 @@ class PublicDocuments(unittest.TestCase):
         self.assertEqual(api14('15-163-24539'),'15163245390000')
         self.assertEqual(api14('15-163-24539-0100'),'15163245390100')
         with self.assertRaises(ValueError): api14('43-047-15065')
+
+    def test_time_budget_checkpoints_unprocessed_wells_without_marking_them_failed(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(kansas_documents, 'ROOT', Path(directory)), \
+             patch.object(kansas_documents, 'load_env'), \
+             patch.object(kansas_documents, 'R2'), \
+             patch.object(kansas_documents, 'rows', return_value=[{'id': 'a'}, {'id': 'b'}]), \
+             patch.object(kansas_documents, 'process') as process, \
+             patch.object(kansas_documents.time, 'monotonic', side_effect=[0, 21601]), \
+             patch('sys.argv', ['kansas_documents.py']), patch('builtins.print'):
+            kansas_documents.main()
+            report = json.loads((Path(directory)/'data/kansas/documents/latest-run.json').read_text())
+            self.assertTrue(report['budget_exhausted'])
+            self.assertEqual(report['remaining'], 2)
+            self.assertEqual(report['failed'], 0)
+            process.assert_not_called()
 
 
 if __name__ == '__main__':

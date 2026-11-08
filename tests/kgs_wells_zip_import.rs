@@ -160,3 +160,55 @@ async fn identical_zip_checksum_is_skipped_on_a_second_run() {
 
     let _ = std::fs::remove_file(&dest);
 }
+
+#[tokio::test]
+async fn abandoned_running_zip_can_be_retried_without_publishing_partial_rows() {
+    use future_wells_kansas::source::{ingestion_run, registry};
+    use sha2::{Digest, Sha256};
+    let server = MockServer::start().await;
+    let bytes = build_fixture_zip("abandoned_retry");
+    let checksum = format!("{:x}", Sha256::digest(&bytes));
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes))
+        .mount(&server)
+        .await;
+    let pool = test_pool().await;
+    let source = registry::find_source_by_code(&pool, "KGS_WELLS_ZIP")
+        .await
+        .unwrap()
+        .unwrap();
+    let abandoned = ingestion_run::start_run(
+        &pool,
+        ingestion_run::DownloadedPayload {
+            source_id: source.id,
+            source_url: &server.uri(),
+            retrieved_at: chrono::Utc::now(),
+            source_modified_at: None,
+            payload_checksum: &checksum,
+            schema_fingerprint: None,
+            parser_version: "test-abandoned",
+        },
+    )
+    .await
+    .unwrap();
+    let dest = std::env::temp_dir().join(format!("ks-retry-{}.zip", uuid::Uuid::new_v4()));
+    let result = run_zip_snapshot_import(
+        &pool,
+        &reqwest::Client::new(),
+        &server.uri(),
+        &dest,
+        fast_retry_policy(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.status, ImportStatus::Completed);
+    assert_ne!(result.run_id, abandoned);
+    let status: String = sqlx::query_scalar("SELECT status FROM ks_ingestion_run WHERE id=$1")
+        .bind(abandoned)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "failed");
+    assert_eq!(result.included_count, 1);
+    std::fs::remove_file(dest).unwrap();
+}

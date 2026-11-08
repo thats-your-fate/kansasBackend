@@ -332,11 +332,30 @@ pub async fn run_zip_snapshot_import(
         .await?
         .ok_or(ImportError::SourceNotFound(constants::KGS_WELLS_ZIP))?;
 
+    // Hold a dedicated transaction-scoped lock for this source throughout the
+    // worker. PostgreSQL releases it even after an OOM/terminated connection.
+    // Once acquired, any earlier running ZIP run belongs to a dead worker;
+    // leaving it running would permanently block a retry of the same checksum.
+    let mut worker_lock = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("kgs-wells-zip:{}", source.id))
+        .execute(&mut *worker_lock)
+        .await?;
+    sqlx::query(
+        "UPDATE ks_ingestion_run SET status='failed', completed_at=now(), updated_at=now(),
+         failure_message='Abandoned ZIP worker recovered after acquiring exclusive source lock'
+         WHERE source_id=$1 AND status='running'",
+    )
+    .bind(source.id)
+    .execute(pool)
+    .await?;
+
     let downloaded = zip_source::download_zip(client, zip_url, dest_path, retry_policy).await?;
 
     if let Some(existing_run_id) =
         ingestion_run::find_completed_run_by_checksum(pool, source.id, &downloaded.sha256).await?
     {
+        worker_lock.rollback().await?;
         return Ok(ImportOutcome {
             run_id: existing_run_id,
             status: ImportStatus::UnchangedSkipped,
@@ -422,6 +441,7 @@ pub async fn run_zip_snapshot_import(
     )
     .await?;
 
+    worker_lock.rollback().await?;
     Ok(ImportOutcome {
         run_id,
         status: ImportStatus::Completed,

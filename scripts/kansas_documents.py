@@ -340,6 +340,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--since', default=os.environ.get('KS_DOCUMENTS_SINCE', '2025-01-01'))
     parser.add_argument('--limit', type=int, default=int(os.environ.get('KS_DOCUMENTS_LIMIT', '2000')))
+    parser.add_argument('--max-seconds', type=int, default=int(os.environ.get('KS_DOCUMENTS_MAX_SECONDS', '21600')),
+                        help='Checkpoint and yield before the native service timeout (default: six hours)')
     parser.add_argument('--kid', action='append', help='Explicit source KID for a targeted normal ingestion run')
     parser.add_argument('--retry-failed', action='store_true', help='Recheck failed pages after a source/parser repair')
     parser.add_argument('--recheck', action='store_true', help='Download and verify unchanged source URLs too')
@@ -347,6 +349,9 @@ def main():
     since = date.fromisoformat(args.since)
     if since > date.today() or not 1 <= args.limit <= 10000:
         raise ValueError('invalid discovery scope')
+    if not 60 <= args.max_seconds <= 25200:
+        raise ValueError('document time budget must be between one minute and seven hours')
+    started = time.monotonic()
     directory = ROOT / 'data/kansas/documents'
     directory.mkdir(parents=True, exist_ok=True)
     with (directory / 'worker.lock').open('w') as lock:
@@ -367,8 +372,11 @@ def main():
             s.checked_at ASC NULLS FIRST,greatest(w.permit_date,w.completion_date,w.plug_date) DESC NULLS LAST,w.api14
           LIMIT {args.limit}""")
         report = dict(started_at=datetime.now(timezone.utc).isoformat(), since=str(since), pipeline_version=VERSION,
-                      selected=len(wells), checked=0, imported=0, failed=0, failures=[])
+                      selected=len(wells), checked=0, imported=0, failed=0, failures=[], budget_exhausted=False)
         for well in wells:
+            if time.monotonic() - started >= args.max_seconds:
+                report['budget_exhausted'] = True
+                break
             try:
                 # A successful scan older than a week forces PDF revision checks.
                 result = process(well, storage, since, args.recheck or well['checked_at'] is not None)
@@ -389,6 +397,7 @@ def main():
             write_json(directory / 'latest-run.json', report)
             time.sleep(float(os.environ.get('KS_DOCUMENTS_DELAY', '0.3')))
         report['completed_at'] = datetime.now(timezone.utc).isoformat()
+        report['remaining'] = report['selected'] - report['checked'] - report['failed']
         write_json(directory / 'latest-run.json', report)
         print(json.dumps(report), flush=True)
         if report['failed']:
