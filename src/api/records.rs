@@ -109,6 +109,22 @@ pub struct ProductionQuery {
     pub page: Option<i64>,
 }
 
+// Resolve exact public well/lease relationships once, then use the existing
+// lease index. A correlated EXISTS used to rescan links for every source row.
+fn production_scope(has_api: bool) -> (String, String) {
+    let predicate = r#"p.record_kind='monthly' AND make_date(p.year,p.month,1)>='2025-01-01'::date
+      AND r.status='completed' AND r.parser_version='kgs_production_zip-v1'
+      AND r.source_url LIKE 'https://www.kgs.ku.edu/PRS/Ora_Archive/%'
+      AND ($2::text IS NULL OR lower(p.county)=lower(regexp_replace($2,' County$','','i')))
+      AND ($3::date IS NULL OR make_date(p.year,p.month,1)=$3)"#;
+    if has_api {
+        let cte = "WITH linked AS MATERIALIZED (SELECT DISTINCT l.lease_id,l.product FROM ks_well_lease_link l JOIN ks_well w ON w.internal_well_id=l.well_id WHERE l.confidence=1 AND NOT w.is_tombstoned AND (w.api14=$1 OR w.api_raw=$1 OR w.kgs_kid=$1))";
+        (cte.into(),format!("FROM linked JOIN ks_lease_production_month p ON p.lease_id=linked.lease_id AND p.product=linked.product JOIN ks_ingestion_run r ON r.id=p.source_ingestion_run_id WHERE {predicate}"))
+    } else {
+        (String::new(),format!("FROM ks_lease_production_month p JOIN ks_ingestion_run r ON r.id=p.source_ingestion_run_id WHERE $1::text IS NULL AND {predicate}"))
+    }
+}
+
 pub async fn production(
     State(state): State<AppState>,
     Query(q): Query<ProductionQuery>,
@@ -119,22 +135,14 @@ pub async fn production(
     }
     // Verified lease relationships are context, never divide a lease volume by
     // its well count or duplicate it into individual-well production records.
-    let predicate = r#"p.record_kind='monthly' AND make_date(p.year,p.month,1)>='2025-01-01'::date
-      AND r.status='completed' AND r.parser_version='kgs_production_zip-v1'
-      AND r.source_url LIKE 'https://www.kgs.ku.edu/PRS/Ora_Archive/%'
-      AND ($1::text IS NULL OR EXISTS(SELECT 1 FROM ks_well_lease_link l JOIN ks_well w ON w.internal_well_id=l.well_id
-        WHERE l.lease_id=p.lease_id AND l.product=p.product AND l.confidence=1 AND NOT w.is_tombstoned
-          AND (w.api14=$1 OR w.api_raw=$1 OR w.kgs_kid=$1)))
-      AND ($2::text IS NULL OR lower(p.county)=lower(regexp_replace($2,' County$','','i')))
-      AND ($3::date IS NULL OR make_date(p.year,p.month,1)=$3)"#;
-    let base=format!("FROM ks_lease_production_month p JOIN ks_ingestion_run r ON r.id=p.source_ingestion_run_id WHERE {predicate}");
-    let total: i64 = sqlx::query_scalar(&format!("SELECT count(*) {base}"))
+    let (cte, base) = production_scope(q.api.is_some());
+    let total: i64 = sqlx::query_scalar(&format!("{cte} SELECT count(*) {base}"))
         .bind(&q.api)
         .bind(&q.county)
         .bind(q.month)
         .fetch_one(&state.pool)
         .await?;
-    let items:Vec<Value>=sqlx::query_scalar(&format!(r#"SELECT jsonb_build_object('id',p.id,'lease_kid',p.lease_kid,
+    let items:Vec<Value>=sqlx::query_scalar(&format!(r#"{cte} SELECT jsonb_build_object('id',p.id,'lease_kid',p.lease_kid,
       'lease_name',p.reported_lease_name,'product',p.product,'month',make_date(p.year,p.month,1),
       'volume',p.production_volume,'unit',CASE p.product WHEN 'oil' THEN 'bbl' ELSE 'Mcf' END,
       'county',p.county,'operator',p.operator,'imported_at',r.completed_at,'source_url',r.source_url)
@@ -144,4 +152,46 @@ pub async fn production(
         json!({"data":{"items":items,"page":page,"total_items":total,"total_pages":(total+49)/50},
       "meta":{"reporting_level":"lease","quality_warnings":["Lease volumes are not individual-well production. The latest source month can be partial."]}}),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    #[ignore = "explicit Kansas pg_temp production query fixture"]
+    async fn production_linked_scope_preserves_product_and_visibility() -> anyhow::Result<()> {
+        anyhow::ensure!(
+            std::env::var("KS_TEST_TEMP_DB").as_deref() == Ok("1"),
+            "explicit fixture flag required"
+        );
+        let dsn = std::env::var("PG_CONNECTION")?;
+        let url = url::Url::parse(&dsn)?;
+        anyhow::ensure!(
+            url.path() == "/future_wells_kansas",
+            "Kansas target required"
+        );
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&dsn)
+            .await
+            .map_err(|_| anyhow::anyhow!("Kansas fixture connection unavailable"))?;
+        let mut db = pool.acquire().await?;
+        sqlx::raw_sql("CREATE TEMP TABLE ks_well(internal_well_id int,api14 text,api_raw text,kgs_kid text,is_tombstoned bool); CREATE TEMP TABLE ks_well_lease_link(well_id int,lease_id int,product text,confidence numeric); CREATE TEMP TABLE ks_lease_production_month(lease_id int,product text,record_kind text,year int,month int,county text,source_ingestion_run_id int); CREATE TEMP TABLE ks_ingestion_run(id int,status text,parser_version text,source_url text); SET search_path TO pg_temp,public; INSERT INTO ks_well VALUES(1,'15000000010000','15-000-00001','100',false),(2,'15000000020000',NULL,'200',true); INSERT INTO ks_well_lease_link VALUES(1,10,'oil',1),(1,10,'oil',1),(1,20,'gas',0.5),(2,30,'gas',1); INSERT INTO ks_ingestion_run VALUES(1,'completed','kgs_production_zip-v1','https://www.kgs.ku.edu/PRS/Ora_Archive/test.zip'); INSERT INTO ks_lease_production_month VALUES(10,'oil','monthly',2026,9,'Test',1),(10,'gas','monthly',2026,9,'Test',1),(20,'gas','monthly',2026,9,'Test',1),(30,'gas','monthly',2026,9,'Test',1)").execute(&mut *db).await?;
+        async fn count(db: &mut sqlx::PgConnection, api: Option<&str>) -> anyhow::Result<i64> {
+            let (cte, base) = production_scope(api.is_some());
+            Ok(sqlx::query_scalar(&format!("{cte} SELECT count(*) {base}"))
+                .bind(api)
+                .bind(None::<String>)
+                .bind(None::<NaiveDate>)
+                .fetch_one(db)
+                .await?)
+        }
+        assert_eq!(count(&mut db, Some("15000000010000")).await?, 1);
+        assert_eq!(count(&mut db, Some("100")).await?, 1);
+        assert_eq!(count(&mut db, Some("15000000020000")).await?, 0);
+        assert_eq!(count(&mut db, None).await?, 4);
+        drop(db);
+        pool.close().await;
+        Ok(())
+    }
 }
