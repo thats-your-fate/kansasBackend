@@ -77,7 +77,7 @@ async fn insert_well(pool: &PgPool, run_id: Uuid, spec: WellSpec<'_>) -> WellFix
             source_ingestion_run_id, is_tombstoned, tombstoned_at, field_name, lease_name
         )
         VALUES (
-            $1, $1, 'Test Well 1-H', $2, 'valid', 'api14',
+            $1, $1, '1-H', $2, 'valid', 'api14',
             'active', 'OIL', 'AC', 'this is a raw kgs comment nobody should ever export', 4500, 'Mississippian',
             $3, $3, ST_SetSRID(ST_MakePoint($4, $5), 4326), 'arcgis',
             $6, $7, CASE WHEN $7 THEN now() ELSE NULL END, 'Schoenchen', 'Pivonka A'
@@ -442,6 +442,9 @@ async fn well_export_carries_geometry_identity_and_raw_status_but_never_raw_comm
     assert_eq!(record.source.source_payload["status_raw"], json!("AC"));
     assert_eq!(record.source.source_payload["field_name"], json!("Schoenchen"));
     assert_eq!(record.source.source_payload["lease_name"], json!("Pivonka A"));
+    assert_eq!(record.source.source_payload["source_well_name"], json!("1-H"));
+    assert_eq!(record.well_name.as_deref(), Some("Pivonka A #1-H"));
+    assert_eq!(record.well_number.as_deref(), Some("1-H"));
 
     let wellbores: Vec<future_wells_kansas::state_export::contract::WellboreV1> =
         package.records("wellbores");

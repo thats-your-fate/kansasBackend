@@ -584,6 +584,27 @@ async fn export_regulatory_areas(pool: &PgPool, writer: &mut EntityPartWriter) -
     Ok(count)
 }
 
+/// KGS calls the well identifier (including alphanumeric values such as W-5)
+/// `WELL`/`WELL_NAME`; the actual name is in `LEASE`/`LEASE_NAME`.
+/// Keep both in the shared display name and expose the identifier separately.
+fn exported_well_identity(
+    lease_name: Option<&str>,
+    well_name: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let lease = lease_name.map(str::trim).filter(|s| !s.is_empty());
+    let number = well_name.map(str::trim).filter(|s| !s.is_empty());
+    let name = match (lease, number) {
+        (Some(lease), Some(number)) if lease.eq_ignore_ascii_case(number) => lease.to_owned(),
+        (Some(lease), Some(number)) => {
+            format!("{lease} #{}", number.trim_start_matches('#').trim_start())
+        }
+        (Some(lease), None) => lease.to_owned(),
+        (None, Some(number)) => number.to_owned(),
+        (None, None) => return (None, None),
+    };
+    (Some(name), number.map(str::to_owned))
+}
+
 async fn export_wells(
     pool: &PgPool,
     writer: &mut EntityPartWriter,
@@ -615,6 +636,10 @@ async fn export_wells(
         let id: Uuid = row.try_get("internal_well_id")?;
         let source_key = keys::well(id);
         let county: Option<String> = row.try_get("county")?;
+        let source_well_name: Option<String> = row.try_get("well_name")?;
+        let lease_name: Option<String> = row.try_get("lease_name")?;
+        let (well_name, well_number) =
+            exported_well_identity(lease_name.as_deref(), source_well_name.as_deref());
         let payload = json!({
             "verified_production_leases": row.try_get::<Value, _>("verified_production_leases")?,
             "kgs_kid": row.try_get::<Option<String>, _>("kgs_kid")?,
@@ -625,7 +650,8 @@ async fn export_wells(
             "operator_name_kgs_original": row.try_get::<Option<String>, _>("operator_name_kgs_original")?,
             "operator_name_kgs_reported_current": row.try_get::<Option<String>, _>("operator_name_kgs_reported_current")?,
             "field_name": row.try_get::<Option<String>, _>("field_name")?,
-            "lease_name": row.try_get::<Option<String>, _>("lease_name")?,
+            "lease_name": lease_name,
+            "source_well_name": source_well_name,
             "total_depth": row.try_get::<Option<i32>, _>("total_depth")?,
             "producing_formation": row.try_get::<Option<String>, _>("producing_formation")?,
             "formation_at_total_depth": row.try_get::<Option<String>, _>("formation_at_total_depth")?,
@@ -658,8 +684,8 @@ async fn export_wells(
             ),
             normalized_api_number: row.try_get::<Option<String>, _>("api14")?,
             displayed_api_number: row.try_get::<Option<String>, _>("api_raw")?,
-            well_name: row.try_get::<Option<String>, _>("well_name")?,
-            well_number: None,
+            well_name,
+            well_number,
             operator_source_key: None,
             county_source_key: county.map(|c| keys::county(&c)),
             current_status: Some(row.try_get("lifecycle_status")?),
@@ -1164,4 +1190,39 @@ fn opt_f64_string(row: &sqlx::postgres::PgRow, column: &str) -> Result<Option<St
         .ok()
         .flatten()
         .map(|value| format!("{value:.7}")))
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::exported_well_identity;
+
+    #[test]
+    fn kansas_export_keeps_lease_names_and_well_numbers() {
+        for (lease, number, expected) in [
+            ("SOUTH MYNATT", "34", "SOUTH MYNATT #34"),
+            ("L-J", "1", "L-J #1"),
+            ("WRESTLER", "19", "WRESTLER #19"),
+            ("MYNATT", "W-5", "MYNATT #W-5"),
+        ] {
+            let (name, well_number) = exported_well_identity(Some(lease), Some(number));
+            assert_eq!(name.as_deref(), Some(expected));
+            assert_eq!(well_number.as_deref(), Some(number));
+        }
+    }
+
+    #[test]
+    fn kansas_export_preserves_partial_and_blank_identities() {
+        for (lease, number, expected_name, expected_number) in [
+            (Some(" NAME "), Some(" 34 "), Some("NAME #34"), Some("34")),
+            (Some("NAME"), None, Some("NAME"), None),
+            (None, Some("34"), Some("34"), Some("34")),
+            (Some(" "), Some(""), None, None),
+            (Some("NAME"), Some("name"), Some("NAME"), Some("name")),
+            (Some("NAME"), Some("#34"), Some("NAME #34"), Some("#34")),
+        ] {
+            let (name, number) = exported_well_identity(lease, number);
+            assert_eq!(name.as_deref(), expected_name);
+            assert_eq!(number.as_deref(), expected_number);
+        }
+    }
 }
