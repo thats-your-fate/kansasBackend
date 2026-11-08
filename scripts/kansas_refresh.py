@@ -59,6 +59,13 @@ def refresh_wells():
       WHERE id={sql(run_id)}::uuid AND source_url='https://www.kgs.ku.edu/PRS/Ora_Archive/ks_wells.zip'""")
     if len(checks) != 1 or checks[0]['status'] != 'completed' or checks[0]['row_count'] < 400000:
         raise RuntimeError('refusing incomplete well inventory publication')
+    previous_path = ROOT / 'data/kansas/wells/last-success.json'
+    if previous_path.exists():
+        previous = json.loads(previous_path.read_text())
+        if previous.get('result', {}).get('run_id') == run_id:
+            # Only distinct completed snapshots may advance missing-well counts.
+            # A daily check of unchanged bytes must not tombstone a well twice.
+            return dict(run_id=run_id, unchanged=True)
     cli('mark-run-backfill', run_id)
     result = cli('materialize-wells', run_id, timeout=21600)
     cli('repair-well-mappings')
