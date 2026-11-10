@@ -296,7 +296,7 @@ def publish(well, item, pdf, pages, key, effective):
     return json.loads(result.splitlines()[-1])
 
 
-def process(well, storage, since, recheck=False):
+def process(well, storage, since, recheck=False, reviews=None):
     page = fetch(DETAIL + well['kgs_kid'], 4 * 1024 * 1024)
     items = parse_page(page.decode('utf-8', 'strict'), well['kgs_kid'], well['api14'])
     imported = []
@@ -343,6 +343,8 @@ def process(well, storage, since, recheck=False):
                           received=item['received'], reason=str(error),
                           checked_at=datetime.now(timezone.utc).isoformat(), published=False)
             write_json(ROOT / 'data/kansas/documents/review' / (digest(item['url'].encode()) + '.json'), review)
+            if reviews is not None:
+                reviews.append(review)
             print(json.dumps(dict(document_review=review)), flush=True)
     return digest(page), len(items), imported
 
@@ -384,14 +386,17 @@ def main():
             s.checked_at ASC NULLS FIRST,greatest(w.permit_date,w.completion_date,w.plug_date) DESC NULLS LAST,w.api14
           LIMIT {args.limit}""")
         report = dict(started_at=datetime.now(timezone.utc).isoformat(), since=str(since), pipeline_version=VERSION,
-                      selected=len(wells), checked=0, imported=0, failed=0, failures=[], budget_exhausted=False)
+                      selected=len(wells), checked=0, imported=0, failed=0, needs_review=0, review_documents=[], failures=[], budget_exhausted=False)
         for well in wells:
             if time.monotonic() - started >= args.max_seconds:
                 report['budget_exhausted'] = True
                 break
             try:
                 # A successful scan older than a week forces PDF revision checks.
-                result = process(well, storage, since, args.recheck or well['checked_at'] is not None)
+                reviews = []
+                result = process(well, storage, since, args.recheck or well['checked_at'] is not None, reviews=reviews)
+                report['needs_review'] += len(reviews)
+                report['review_documents'].extend(reviews)
                 page_hash, count, imported = result
                 query(f"""INSERT INTO ks_document_scan(well_id,page_hash,document_count) VALUES
                   ({sql(well['id'])}::uuid,{sql(page_hash)},{count}) ON CONFLICT(well_id) DO UPDATE SET
