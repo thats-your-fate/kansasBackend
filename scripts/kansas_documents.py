@@ -27,6 +27,11 @@ MAX_PDF = 50 * 1024 * 1024
 VERSION = 'kgs-public-pdf-v1'
 
 
+class DocumentReview(ValueError):
+    """A source file withheld from publication pending identity/size review."""
+
+
+
 def digest(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -151,7 +156,7 @@ def fetch(url, maximum, referer=None):
             with build_opener(NoRedirect).open(Request(url, headers={'User-Agent': 'FutureWells-Kansas-PublicRecords/1.0', 'Referer': referer or 'https://www.kgs.ku.edu/Magellan/Qualified/kid.html'}), timeout=30) as r:
                 content = r.read(maximum + 1)
                 if len(content) > maximum:
-                    raise ValueError('source response too large')
+                    raise DocumentReview('source response too large')
                 return content
         except (OSError, TimeoutError):
             if attempt == 2:
@@ -308,30 +313,37 @@ def process(well, storage, since, recheck=False):
         if (known and not recheck and known[0]['filing_date'] == item['received']
                 and known[0]['document_type_raw'] == item['label']):
             continue
-        pdf = fetch(item['url'], MAX_PDF, DETAIL + well['kgs_kid'])
-        if not pdf.startswith(b'%PDF-') or b'%%EOF' not in pdf[-4096:]:
-            raise ValueError('source is not a complete PDF')
-        with tempfile.TemporaryDirectory(prefix='ks-pdf-') as temp:
-            path = Path(temp) / 'source.pdf'
-            path.write_bytes(pdf)
-            info = subprocess.run(['pdfinfo', str(path)], capture_output=True, text=True, timeout=30, check=True)
-            match = re.search(r'^Pages:\s*(\d+)', info.stdout, re.M)
-            if not match or not 1 <= int(match[1]) <= 2000 or re.search(r'^Encrypted:\s+yes', info.stdout, re.M):
-                raise ValueError('PDF page count/encryption requires review')
-            textfile = Path(temp) / 'text.txt'
-            subprocess.run(['pdftotext', '-f', '1', '-l', '4', '-layout', str(path), str(textfile)],
-                           capture_output=True, check=True, timeout=60)
-            text = textfile.read_text(errors='replace')
-            # KGS's exact KID/API link is authoritative even for image-only PDFs.
-            # An explicit different API on its cover requires review.
-            cover_apis = {api14(m) for m in re.findall(r'\b15-\d{3}-\d{5}(?:-\d{2}-?\d{2})?\b', text)}
-            if cover_apis and cover_apis != {well['api14']}:
-                raise ValueError('PDF contains other/multiple well APIs')
-            effective = effective_date(text, classify(item['label'])[0])
-            if effective and effective > item['received']:
-                effective = None
-            key = storage.store(path, digest(pdf))
-            imported.append(publish(well, item, pdf, int(match[1]), key, effective))
+        try:
+            pdf = fetch(item['url'], MAX_PDF, DETAIL + well['kgs_kid'])
+            if not pdf.startswith(b'%PDF-') or b'%%EOF' not in pdf[-4096:]:
+                raise ValueError('source is not a complete PDF')
+            with tempfile.TemporaryDirectory(prefix='ks-pdf-') as temp:
+                path = Path(temp) / 'source.pdf'
+                path.write_bytes(pdf)
+                info = subprocess.run(['pdfinfo', str(path)], capture_output=True, text=True, timeout=30, check=True)
+                match = re.search(r'^Pages:\s*(\d+)', info.stdout, re.M)
+                if not match or not 1 <= int(match[1]) <= 2000 or re.search(r'^Encrypted:\s+yes', info.stdout, re.M):
+                    raise ValueError('PDF page count/encryption requires review')
+                textfile = Path(temp) / 'text.txt'
+                subprocess.run(['pdftotext', '-f', '1', '-l', '4', '-layout', str(path), str(textfile)],
+                               capture_output=True, check=True, timeout=60)
+                text = textfile.read_text(errors='replace')
+                # KGS's exact KID/API link is authoritative even for image-only PDFs.
+                # An explicit different API on its cover requires review.
+                cover_apis = {api14(m) for m in re.findall(r'\b15-\d{3}-\d{5}(?:-\d{2}-?\d{2})?\b', text)}
+                if cover_apis and cover_apis != {well['api14']}:
+                    raise DocumentReview('PDF contains other/multiple well APIs')
+                effective = effective_date(text, classify(item['label'])[0])
+                if effective and effective > item['received']:
+                    effective = None
+                key = storage.store(path, digest(pdf))
+                imported.append(publish(well, item, pdf, int(match[1]), key, effective))
+        except DocumentReview as error:
+            review = dict(kid=well['kgs_kid'], api14=well['api14'], source_url=item['url'],
+                          received=item['received'], reason=str(error),
+                          checked_at=datetime.now(timezone.utc).isoformat(), published=False)
+            write_json(ROOT / 'data/kansas/documents/review' / (digest(item['url'].encode()) + '.json'), review)
+            print(json.dumps(dict(document_review=review)), flush=True)
     return digest(page), len(items), imported
 
 
