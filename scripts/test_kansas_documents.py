@@ -105,6 +105,22 @@ class PublicDocuments(unittest.TestCase):
             self.assertEqual(kansas_documents.fetch(URL, 100), b'%PDF-recovered')
         self.assertEqual(opener.open.call_count, 3)
 
+    def test_one_failed_source_page_does_not_abort_successful_scans(self):
+        wells = [dict(id='a',kgs_kid='1',api14='15000000010000',checked_at=None),
+                 dict(id='b',kgs_kid='2',api14='15000000020000',checked_at=None)]
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(kansas_documents, 'ROOT', Path(directory)), \
+             patch.object(kansas_documents, 'load_env'), patch.object(kansas_documents, 'R2'), \
+             patch.object(kansas_documents, 'rows', return_value=wells), \
+             patch.object(kansas_documents, 'query'), \
+             patch.object(kansas_documents, 'process', side_effect=[TimeoutError('source timeout'), ('page-hash',1,[])]), \
+             patch.object(kansas_documents.time, 'sleep'), \
+             patch('sys.argv', ['kansas_documents.py']), patch('builtins.print'):
+            kansas_documents.main()
+            report=json.loads((Path(directory)/'data/kansas/documents/latest-run.json').read_text())
+            self.assertEqual(report['failed'],1);self.assertEqual(report['checked'],1)
+            self.assertTrue(report['partial']);self.assertEqual(len(report['failures']),1)
+
     def test_time_budget_checkpoints_unprocessed_wells_without_marking_them_failed(self):
         with tempfile.TemporaryDirectory() as directory, \
              patch.object(kansas_documents, 'ROOT', Path(directory)), \

@@ -153,7 +153,7 @@ def fetch(url, maximum, referer=None):
         raise ValueError('unapproved source URL')
     for attempt in range(3):
         try:
-            with build_opener(NoRedirect).open(Request(url, headers={'User-Agent': 'FutureWells-Kansas-PublicRecords/1.0', 'Referer': referer or 'https://www.kgs.ku.edu/Magellan/Qualified/kid.html'}), timeout=30) as r:
+            with build_opener(NoRedirect).open(Request(url, headers={'User-Agent': 'FutureWells-Kansas-PublicRecords/1.0', 'Referer': referer or 'https://www.kgs.ku.edu/Magellan/Qualified/kid.html'}), timeout=60) as r:
                 content = r.read(maximum + 1)
                 if len(content) > maximum:
                     raise DocumentReview('source response too large')
@@ -415,10 +415,11 @@ def main():
             time.sleep(float(os.environ.get('KS_DOCUMENTS_DELAY', '0.3')))
         report['completed_at'] = datetime.now(timezone.utc).isoformat()
         report['remaining'] = report['selected'] - report['checked'] - report['failed']
+        report['partial'] = bool(report['failed'] or report['needs_review'] or report['budget_exhausted'])
         write_json(directory / 'latest-run.json', report)
         print(json.dumps(report), flush=True)
-        if report['failed']:
-            raise RuntimeError('Some well document scans failed; see the private run report')
+        if report['failed'] and not report['checked']:
+            raise RuntimeError('No well document scans succeeded; see the private run report')
 
 
 if __name__ == '__main__':
