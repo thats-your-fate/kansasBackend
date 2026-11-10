@@ -87,6 +87,24 @@ class PublicDocuments(unittest.TestCase):
             self.assertEqual(len(list((Path(directory)/'data/kansas/documents/review').glob('*.json'))), 1)
             storage.store.assert_called_once()
 
+    def test_oversized_pdf_stays_bounded_and_requires_review(self):
+        from unittest.mock import MagicMock
+        opener = MagicMock()
+        opener.open.return_value.__enter__.return_value.read.return_value = b'x'*11
+        with patch.object(kansas_documents, 'build_opener', return_value=opener):
+            with self.assertRaises(kansas_documents.DocumentReview):
+                kansas_documents.fetch(URL, 10)
+            opener.open.return_value.__enter__.return_value.read.assert_called_once_with(11)
+
+    def test_timeout_retries_are_bounded_and_can_recover(self):
+        from unittest.mock import MagicMock
+        opener, response = MagicMock(), MagicMock()
+        response.__enter__.return_value.read.return_value = b'%PDF-recovered'
+        opener.open.side_effect = [TimeoutError('source timeout'), TimeoutError('source timeout'), response]
+        with patch.object(kansas_documents, 'build_opener', return_value=opener), patch.object(kansas_documents.time, 'sleep'):
+            self.assertEqual(kansas_documents.fetch(URL, 100), b'%PDF-recovered')
+        self.assertEqual(opener.open.call_count, 3)
+
     def test_time_budget_checkpoints_unprocessed_wells_without_marking_them_failed(self):
         with tempfile.TemporaryDirectory() as directory, \
              patch.object(kansas_documents, 'ROOT', Path(directory)), \
