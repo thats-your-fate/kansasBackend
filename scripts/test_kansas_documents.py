@@ -65,24 +65,27 @@ class PublicDocuments(unittest.TestCase):
         well = dict(id='well-id', kgs_kid='1057551044', api14='15163245390000')
         second = URL.replace('1322168976', '1322168977')
         items = [dict(url=u, label='Intent To Drill Well', received='2026-08-06') for u in (URL, second)]
+        text_calls = []
         def run(command, **kwargs):
             from types import SimpleNamespace
             if command[0] == 'pdfinfo': return SimpleNamespace(stdout='Pages: 1')
-            Path(command[-1]).write_text('API 15-001-00001' if 'source.pdf' in command[-2] else '')
+            Path(command[-1]).write_text('API 15-001-00001' if not text_calls else 'API 15-163-24539')
+            text_calls.append(1)
             return SimpleNamespace()
         with tempfile.TemporaryDirectory() as directory, \
              patch.object(kansas_documents, 'ROOT', Path(directory)), \
              patch.object(kansas_documents, 'parse_page', return_value=items), \
              patch.object(kansas_documents, 'fetch', side_effect=[b'page', b'%PDF-test%%EOF', b'%PDF-test%%EOF']), \
              patch.object(kansas_documents, 'rows', return_value=[]), \
+             patch.object(kansas_documents, 'publish', return_value={'document_id': 'valid'}), \
              patch.object(kansas_documents.subprocess, 'run', side_effect=run), \
              patch('builtins.print'):
             from unittest.mock import Mock
             storage = Mock()
             result = kansas_documents.process(well, storage, kansas_documents.date.fromisoformat('2025-01-01'))
-            self.assertEqual(result[2], [])
-            self.assertEqual(len(list((Path(directory)/'data/kansas/documents/review').glob('*.json'))), 2)
-            storage.store.assert_not_called()
+            self.assertEqual(result[2], [{'document_id': 'valid'}])
+            self.assertEqual(len(list((Path(directory)/'data/kansas/documents/review').glob('*.json'))), 1)
+            storage.store.assert_called_once()
 
     def test_time_budget_checkpoints_unprocessed_wells_without_marking_them_failed(self):
         with tempfile.TemporaryDirectory() as directory, \
