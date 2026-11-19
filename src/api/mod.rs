@@ -34,6 +34,7 @@ pub fn router(state: AppState) -> Router {
             "/api/ks/seo/sitemap-directories",
             get(seo::sitemap_directories),
         )
+        .route("/api/ks/seo/sitemap-wells", get(seo::sitemap_wells))
         .route("/health", get(health::health))
         .with_state(state)
 }

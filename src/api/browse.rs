@@ -68,6 +68,8 @@ pub struct BrowseWellDetail {
     pub well: BrowseWellCard,
     pub related_wells: Vec<BrowseWellCard>,
     pub documents: Vec<serde_json::Value>,
+    /// Search tier and evidence date shared with the well sitemap.
+    pub seo: Option<super::seo::WellSeo>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -366,9 +368,11 @@ pub async fn well_detail(
     } else {
         Vec::new()
     };
+    let seo = super::seo::well_seo(&state.pool, well.id).await?;
     Ok(Json(Envelope::new(
         BrowseWellDetail {
             documents: super::records::documents_for_well(&state.pool, well.id).await?,
+            seo,
             well,
             related_wells,
         },
