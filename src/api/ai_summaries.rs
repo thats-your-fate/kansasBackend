@@ -29,7 +29,7 @@ use std::{
 };
 use uuid::Uuid;
 
-pub const PROMPT_VERSION: &str = "ks-well-summary-v1";
+pub const PROMPT_VERSION: &str = "ks-well-summary-v2";
 const DEFAULT_MODEL: &str = "Qwen/Qwen3-30B-A3B-Instruct-2507";
 const MAX_WELLS_PER_RUN: i64 = 20_000;
 const MAX_CONCURRENCY: i64 = 256;
@@ -55,7 +55,7 @@ Rules:\n\
 - An \"Operator change\" event means the operator of record changed on that date; \"operator\" in \"well\" is the current operator.\n\
 - Only call it an oil, gas or oil and gas well when \"well_type\" says so.\n\
 - A drilling intent or permit does not mean the well was drilled.\n\
-- Kansas production is reported per lease (KGS), which can include several wells. Mention \"lease_production\" only when volumes are given, say it is reported at the lease level, and never call it this well's own output.\n\
+- Kansas production is reported per lease (KGS), which can include several wells. If \"lease_production\" is absent, do not mention lease production at all. When \"lease_production\" is present, say the reported volume is at the lease level (shared across wells on the lease, not this well's own output).\n\
 - Units: oil and water are barrels; gas \"mcf\" means thousand cubic feet (write \"Mcf\" or \"thousand cubic feet\"). Never write million or billion.\n\
 - Depths are in feet: \"total_depth_ft\" is the total depth on record.\n\
 - Describe the well's condition only from \"progress\", the well's dates and \"lease_production\"; never write the word \"status\". Say that something has not happened only when \"progress\" says so.\n\
@@ -1454,7 +1454,7 @@ async fn build_input(
             .get::<Option<String>, _>(col)
             .as_deref()
             .map(str::trim)
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.is_empty() && !is_placeholder_value(s))
         {
             well_obj.insert(key.to_owned(), Value::String(val.to_owned()));
         }
@@ -1531,9 +1531,16 @@ fn number(value: f64) -> Value {
     }
 }
 
+fn is_placeholder_value(value: &str) -> bool {
+    let n = value.trim().to_ascii_uppercase();
+    matches!(n.as_str(), "UNKNOWN" | "UNNAMED" | "UNAVAILABLE" | "NONE" | "N/A")
+}
+
 fn is_placeholder_operator(name: &str) -> bool {
-    let n = name.to_ascii_uppercase();
-    n.contains("NOT ASSIGNED") || n.trim() == "UNKNOWN" || n.starts_with("OPERATOR ")
+    let n = name.trim().to_ascii_uppercase();
+    n.contains("NOT ASSIGNED")
+        || is_placeholder_value(&n)
+        || n.starts_with("OPERATOR ")
 }
 
 fn well_type_words(code: &str) -> Option<&'static str> {
@@ -1630,7 +1637,8 @@ fn unsupported_words(summary: &str, input: &Value) -> Vec<String> {
         "corporation", "commission", "pool", "field", "lease", "completed", "drilled", "tested",
         "plugged", "located", "operated", "initially", "originally", "production", "unit",
         "number", "mcf", "bbl", "llc", "inc", "lp", "co", "corp", "company", "ltd", "notice",
-        "record", "completion", "permit", "intent", "linked", "january", "february", "march", "april", "may",
+        "record", "completion", "permit", "intent", "linked", "previous", "additional", "further",
+        "documentation", "january", "february", "march", "april", "may",
         "june", "july", "august", "september", "october", "november", "december",
     ];
     let facts_exact = input.to_string();
