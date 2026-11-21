@@ -1,3 +1,4 @@
+pub mod ai_summaries;
 pub mod browse;
 pub mod envelope;
 pub mod error;
@@ -18,6 +19,12 @@ use state::AppState;
 /// `future_wells_kansas_backend_marketing_codex_tasks.md` §7-8, once its
 /// underlying table is materialized from a validated source.
 pub fn router(state: AppState) -> Router {
+    router_with_ai_worker(state, None)
+}
+
+pub fn router_with_ai_worker(state: AppState, ai_worker_pool: Option<sqlx::PgPool>) -> Router {
+    let summary_state = state.clone();
+    let ai_routes = ai_summaries::routes(state.pool.clone(), ai_worker_pool);
     Router::new()
         .route("/api/ks/production", get(records::production))
         .route("/api/ks/documents/:id/download", get(records::download))
@@ -36,5 +43,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/ks/seo/sitemap-wells", get(seo::sitemap_wells))
         .route("/health", get(health::health))
+        .layer(axum::middleware::from_fn_with_state(
+            summary_state,
+            ai_summaries::attach_public_summaries,
+        ))
         .with_state(state)
+        .merge(ai_routes)
 }

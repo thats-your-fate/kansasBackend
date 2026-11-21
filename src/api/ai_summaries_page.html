@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>AI well summaries · Kansas</title>
+  <style>
+    :root { --bg:#f6f8f9; --panel:#fff; --line:#d8dee3; --soft:#eef2f4; --ink:#1d2a33; --muted:#667781;
+            --ok:#2e7d4f; --warn:#a86400; --err:#b3261e; --accent:#1f5f99; }
+    * { box-sizing: border-box; }
+    body { margin:0; font:14px/1.45 system-ui,-apple-system,sans-serif; color:var(--ink); background:var(--bg); }
+    header { display:flex; align-items:center; justify-content:space-between; padding:12px 20px; background:var(--panel); border-bottom:1px solid var(--line); }
+    header h1 { margin:0; font-size:17px; }
+    header nav a { color:var(--accent); text-decoration:none; margin-left:14px; font-weight:600; }
+    main { max-width:1180px; margin:18px auto; padding:0 16px; display:grid; grid-template-columns:360px 1fr; gap:16px; align-items:start; }
+    @media (max-width: 920px) { main { grid-template-columns:1fr; } }
+    .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:16px; margin-bottom:16px; }
+    .card h2 { margin:0 0 12px; font-size:15px; }
+    label { display:block; font-size:12px; font-weight:600; color:var(--muted); margin:10px 0 4px; }
+    input, textarea, select { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:6px; font:inherit; background:#fff; }
+    textarea { min-height:70px; font-family:ui-monospace,monospace; font-size:12px; resize:vertical; }
+    .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+    .btns { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; }
+    button { border:1px solid var(--line); background:#fff; color:var(--ink); border-radius:6px; padding:7px 12px; font:inherit; font-weight:600; cursor:pointer; }
+    button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+    button.danger { color:var(--err); border-color:#e5b9b6; }
+    button.ok { color:var(--ok); border-color:#b6dec4; }
+    button:disabled { opacity:0.5; cursor:default; }
+    .muted { color:var(--muted); font-size:13px; }
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:600; background:var(--soft); }
+    .s-running, .s-cancelling { background:#e3f0fb; color:var(--accent); }
+    .s-completed, .s-approved { background:#e3f4ea; color:var(--ok); }
+    .s-failed, .s-rejected { background:#fbe9e8; color:var(--err); }
+    .s-interrupted, .s-cancelled { background:#fff3e0; color:var(--warn); }
+    .bar { height:8px; background:var(--soft); border-radius:99px; overflow:hidden; margin:10px 0; }
+    .bar > div { height:100%; background:var(--accent); width:0%; transition:width .25s; }
+    .stats { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin:10px 0; }
+    .stat { background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:8px 10px; }
+    .stat span { display:block; font-size:11px; color:var(--muted); }
+    .stat strong { font-size:16px; }
+    .log { background:#111920; color:#d7e2ea; border-radius:6px; padding:10px; height:210px; overflow:auto;
+           font:12px/1.45 ui-monospace,monospace; white-space:pre-wrap; word-break:break-word; }
+    .log .warn { color:#ffcf70; }
+    .log .error { color:#ff8a80; }
+    .run { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:8px 0; border-top:1px solid var(--line); cursor:pointer; }
+    .run:first-child { border-top:0; }
+    .run.active { background:#f3f8fc; margin:0 -8px; padding:8px; border-radius:6px; }
+    .summary { border-top:1px solid var(--line); padding:12px 0; }
+    .summary:first-child { border-top:0; }
+    .summary p { margin:8px 0; line-height:1.55; }
+    .summary details { margin-top:6px; }
+    .summary pre { margin:6px 0 0; background:var(--bg); padding:10px; border-radius:6px; overflow:auto; max-height:240px; font:12px/1.4 ui-monospace,monospace; }
+    .errbox { margin-top:10px; padding:9px 11px; border-radius:6px; background:#fbe9e8; color:var(--err); font-size:13px; display:none; }
+    .check { display:flex; align-items:center; gap:8px; margin-top:10px; font-size:13px; color:var(--ink); }
+    .check input { width:auto; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>AI well summaries <span class="pill">superadmin · draft only</span></h1>
+    <nav>
+      <a href="/app/admin">Admin</a>
+      <a href="/map">Map</a>
+    </nav>
+  </header>
+
+  <main>
+    <div>
+      <section class="card">
+        <h2>Inference box</h2>
+        <label for="endpoints">Endpoint URLs (one per GPU, one per line)</label>
+        <textarea id="endpoints" placeholder="http://123.45.67.89:10100&#10;http://123.45.67.89:10200"></textarea>
+        <label for="token">Box token (kept in memory only)</label>
+        <input id="token" type="password" autocomplete="off">
+        <label for="model">Model</label>
+        <input id="model" value="Qwen/Qwen3-30B-A3B-Instruct-2507">
+        <div class="row">
+          <div><label for="limit">Wells</label><input id="limit" type="number" min="1" max="20000" value="2000"></div>
+          <div><label for="concurrency">In-flight requests</label><input id="concurrency" type="number" min="1" max="256" value="128"></div>
+        </div>
+        <div class="row">
+          <div><label for="since">Active since</label><input id="since" type="date" value="2025-01-01"></div>
+          <div style="display:flex;align-items:end;"><label class="check"><input id="force" type="checkbox"> Regenerate existing</label></div>
+        </div>
+        <div class="btns">
+          <button id="test" type="button">Test box</button>
+          <button id="count" type="button">Count wells</button>
+          <button id="start" class="primary" type="button">Start run</button>
+        </div>
+        <div id="info" class="muted" style="margin-top:10px"></div>
+        <div id="err" class="errbox"></div>
+      </section>
+
+      <section class="card">
+        <h2>Runs</h2>
+        <div id="runs" class="muted">Loading…</div>
+      </section>
+    </div>
+
+    <div>
+      <section class="card" id="runCard" style="display:none">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+          <div>
+            <h2 style="margin:0;display:inline">Run <span id="runId"></span></h2>
+            <span id="runStatus" class="pill" style="margin-left:8px"></span>
+          </div>
+          <div class="btns" style="margin:0">
+            <button id="cancel" class="danger" type="button" style="display:none">Cancel run</button>
+            <button id="resume" class="primary" type="button" style="display:none">Resume with current box</button>
+            <button id="approveDrafts" class="ok" type="button" style="display:none">Approve all drafts</button>
+          </div>
+        </div>
+        <div class="bar"><div id="bar"></div></div>
+        <div id="runMeta" class="muted"></div>
+        <div class="stats">
+          <div class="stat"><span>Done</span><strong id="stDone">0 / 0</strong></div>
+          <div class="stat"><span>Throughput</span><strong id="stRate">—</strong></div>
+          <div class="stat"><span>Failed / skipped</span><strong id="stFail">0 / 0</strong></div>
+          <div class="stat"><span>ETA</span><strong id="stEta">—</strong></div>
+        </div>
+        <div id="runErr" class="errbox"></div>
+        <h2 style="margin-top:12px">Live log</h2>
+        <div id="log" class="log"></div>
+      </section>
+
+      <section class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+          <h2 style="margin:0">Summaries <span id="sumTotal" class="muted"></span></h2>
+          <div style="display:flex;gap:8px;align-items:center">
+            <select id="filter" style="width:auto">
+              <option value="">All</option>
+              <option value="draft">Draft</option>
+              <option value="approved">Approved</option>
+              <option value="rejected">Rejected</option>
+            </select>
+            <select id="scope" style="width:auto">
+              <option value="run">Selected run</option>
+              <option value="all">All runs</option>
+            </select>
+            <button id="refreshSum" type="button">Refresh</button>
+          </div>
+        </div>
+        <div id="summaries" class="muted">No summaries yet.</div>
+        <div class="btns" style="justify-content:space-between">
+          <button id="prev" type="button">Previous</button>
+          <span id="pageInfo" class="muted"></span>
+          <button id="next" type="button">Next</button>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const fmt = (n) => n == null ? '—' : Number(n).toLocaleString();
+    const when = (iso) => iso ? new Date(iso).toLocaleString() : '—';
+
+    let selectedRunId = null;
+    let lastLogId = 0;
+    let sumOffset = 0;
+    let pollTimer = null;
+    let limitTouched = false;
+    $('limit').oninput = () => { limitTouched = true; };
+
+    function showErr(msg) {
+      const box = $('err');
+      box.textContent = msg || '';
+      box.style.display = msg ? 'block' : 'none';
+    }
+
+    async function api(path, opts = {}) {
+      const res = await fetch(path, {
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
+        ...opts,
+      });
+      if (res.status === 401) {
+        location.href = '/login?next=' + encodeURIComponent(location.pathname);
+        throw new Error('Sign in required');
+      }
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error?.message || `HTTP ${res.status}`);
+      return data;
+    }
+
+    function formPayload() {
+      return {
+        endpoint_urls: $('endpoints').value,
+        token: $('token').value,
+        model: $('model').value.trim(),
+        limit: Number($('limit').value),
+        concurrency: Number($('concurrency').value),
+        activity_since: $('since').value,
+        force: $('force').checked,
+      };
+    }
+
+    $('test').onclick = async () => {
+      showErr('');
+      $('info').textContent = 'Testing box…';
+      try {
+        const r = await api('/api/admin/ai-summaries/test-endpoint', {
+          method: 'POST',
+          body: JSON.stringify({ endpoint_urls: $('endpoints').value, token: $('token').value }),
+        });
+        $('info').textContent = r.endpoints.map((e) =>
+          `${e.url}: OK (${e.latency_ms} ms${e.models.length ? ', models: ' + e.models.join(', ') : ''})`
+        ).join(' | ');
+        if (!$('model').value.trim() && r.endpoints[0]?.models?.[0]) {
+          $('model').value = r.endpoints[0].models[0];
+        }
+      } catch (e) { showErr(e.message); $('info').textContent = ''; }
+    };
+
+    async function refreshCandidates(applySuggested = true) {
+      showErr('');
+      $('info').textContent = 'Counting candidates…';
+      try {
+        const p = new URLSearchParams({
+          since: $('since').value, model: $('model').value.trim(), force: String($('force').checked),
+        });
+        const r = await api('/api/admin/ai-summaries/candidates?' + p);
+        const pending = Number(r.pending_wells) || 0;
+        const suggested = Math.min(20000, Math.max(1, pending));
+        if (applySuggested && pending > 0) {
+          $('limit').value = String(suggested);
+        }
+        $('info').textContent = pending > 0
+          ? `${fmt(r.eligible_wells)} wells active since ${r.activity_since}; ${fmt(pending)} pending${applySuggested ? ` (set Wells to ${fmt(suggested)})` : ''}.`
+          : `${fmt(r.eligible_wells)} wells active since ${r.activity_since}; 0 pending.`;
+      } catch (e) { showErr(e.message); $('info').textContent = ''; }
+    }
+
+    $('count').onclick = () => { limitTouched = false; refreshCandidates(true); };
+    $('since').onchange = () => refreshCandidates(!limitTouched);
+    $('model').onchange = () => refreshCandidates(!limitTouched);
+    $('force').onchange = () => refreshCandidates(!limitTouched);
+
+    $('start').onclick = async () => {
+      showErr('');
+      try {
+        const r = await api('/api/admin/ai-summaries/runs', { method: 'POST', body: JSON.stringify(formPayload()) });
+        selectedRunId = r.id;
+        lastLogId = 0;
+        $('log').textContent = '';
+        await loadRuns();
+        await pollRun();
+      } catch (e) { showErr(e.message); }
+    };
+
+    $('cancel').onclick = async () => {
+      if (!selectedRunId) return;
+      try { await api(`/api/admin/ai-summaries/runs/${selectedRunId}/cancel`, { method: 'POST' }); await pollRun(); }
+      catch (e) { showErr(e.message); }
+    };
+
+    $('resume').onclick = async () => {
+      if (!selectedRunId) return;
+      showErr('');
+      try {
+        await api(`/api/admin/ai-summaries/runs/${selectedRunId}/resume`, {
+          method: 'POST',
+          body: JSON.stringify({
+            endpoint_urls: $('endpoints').value,
+            token: $('token').value,
+            concurrency: Number($('concurrency').value),
+          }),
+        });
+        await pollRun();
+      } catch (e) { showErr(e.message); }
+    };
+
+    $('approveDrafts').onclick = async () => {
+      if (!selectedRunId) return;
+      showErr('');
+      const btn = $('approveDrafts');
+      btn.disabled = true;
+      try {
+        const r = await api(`/api/admin/ai-summaries/runs/${selectedRunId}/approve-drafts`, { method: 'POST' });
+        $('info').textContent = `Approved ${fmt(r.approved)} draft(s) from run #${selectedRunId}.`;
+        await loadSummaries();
+      } catch (e) { showErr(e.message); }
+      finally { btn.disabled = false; }
+    };
+
+    async function loadRuns() {
+      const r = await api('/api/admin/ai-summaries/runs');
+      const box = $('runs');
+      if (!r.runs.length) { box.textContent = 'No runs yet.'; return; }
+      if (!selectedRunId) selectedRunId = r.runs[0].id;
+      box.innerHTML = r.runs.map((run) => `
+        <div class="run ${run.id === selectedRunId ? 'active' : ''}" data-id="${run.id}">
+          <div>
+            <strong>#${run.id}</strong> · ${esc(run.model)}<br>
+            <span class="muted">${fmt(run.succeeded_count)}/${fmt(run.selected_count)} ok · ${when(run.created_at)}</span>
+          </div>
+          <span class="pill s-${esc(run.status)}">${esc(run.status)}</span>
+        </div>
+      `).join('');
+      box.querySelectorAll('.run').forEach((el) => {
+        el.onclick = () => {
+          selectedRunId = Number(el.dataset.id);
+          lastLogId = 0; sumOffset = 0;
+          $('log').textContent = '';
+          loadRuns(); pollRun(); loadSummaries();
+        };
+      });
+    }
+
+    async function pollRun() {
+      if (!selectedRunId) return;
+      clearTimeout(pollTimer);
+      const run = await api(`/api/admin/ai-summaries/runs/${selectedRunId}`);
+      $('runCard').style.display = 'block';
+      $('runId').textContent = `#${run.id}`;
+      $('runStatus').textContent = run.status;
+      $('runStatus').className = `pill s-${run.status}`;
+      const done = run.succeeded_count + run.failed_count + run.skipped_count;
+      const pct = run.selected_count ? Math.min(100, Math.round((done / run.selected_count) * 100)) : 0;
+      $('bar').style.width = pct + '%';
+      $('stDone').textContent = `${fmt(done)} / ${fmt(run.selected_count)} (${pct}%)`;
+      $('stFail').textContent = `${fmt(run.failed_count)} / ${fmt(run.skipped_count)}`;
+      const sec = Math.max(1, run.elapsed_seconds || 1);
+      const rate = done > 0 ? (done / sec) * 60 : 0;
+      const tokRate = run.completion_tokens > 0 ? run.completion_tokens / sec : 0;
+      $('stRate').textContent = done > 0 ? `${rate.toFixed(1)} wells/m (${tokRate.toFixed(0)} tok/s)` : '—';
+      const rem = run.selected_count - done;
+      $('stEta').textContent = (run.status === 'running' && rate > 0 && rem > 0)
+        ? `${Math.ceil((rem / rate) * 60)} s` : (run.finished_at ? 'done' : '—');
+      $('runMeta').textContent = `${run.model} · ${run.prompt_version} · concurrency ${run.concurrency} · tokens ${fmt(run.prompt_tokens)} in / ${fmt(run.completion_tokens)} out`;
+      $('cancel').style.display = run.status === 'running' ? 'inline-block' : 'none';
+      $('resume').style.display = (run.status === 'interrupted' || run.status === 'failed' || run.status === 'cancelled') ? 'inline-block' : 'none';
+      $('approveDrafts').style.display = (run.status === 'completed' && run.succeeded_count > 0) ? 'inline-block' : 'none';
+      const re = $('runErr');
+      re.textContent = run.last_error || '';
+      re.style.display = run.last_error ? 'block' : 'none';
+
+      const lg = await api(`/api/admin/ai-summaries/runs/${selectedRunId}/log?after_id=${lastLogId}`);
+      if (lg.entries.length) {
+        const logBox = $('log');
+        const atBottom = logBox.scrollTop + logBox.clientHeight >= logBox.scrollHeight - 24;
+        for (const e of lg.entries) {
+          lastLogId = Math.max(lastLogId, e.id);
+          const line = document.createElement('div');
+          line.className = e.level;
+          line.textContent = `[${new Date(e.logged_at).toLocaleTimeString()}] ${e.lookup_api ? e.lookup_api + ' ' : ''}${e.message}`;
+          logBox.appendChild(line);
+        }
+        if (atBottom) logBox.scrollTop = logBox.scrollHeight;
+      }
+
+      if (run.status === 'running' || run.status === 'cancelling') {
+        pollTimer = setTimeout(() => { pollRun(); loadSummaries(); }, 1500);
+      } else {
+        await loadRuns();
+        await loadSummaries();
+      }
+    }
+
+    async function loadSummaries() {
+      const p = new URLSearchParams({ limit: '25', offset: String(sumOffset) });
+      if ($('filter').value) p.set('status', $('filter').value);
+      if ($('scope').value === 'run' && selectedRunId) p.set('run_id', String(selectedRunId));
+      const r = await api('/api/admin/ai-summaries/summaries?' + p);
+      $('sumTotal').textContent = `(${fmt(r.total)})`;
+      $('pageInfo').textContent = r.total ? `${sumOffset + 1}–${sumOffset + r.summaries.length} of ${fmt(r.total)}` : '';
+      $('prev').disabled = sumOffset === 0;
+      $('next').disabled = sumOffset + r.summaries.length >= r.total;
+      $('summaries').innerHTML = r.summaries.length ? r.summaries.map((s) => `
+        <div class="summary">
+          <div><b>API ${esc(s.lookup_api)}</b> <span class="pill s-${esc(s.review_status)}">${esc(s.review_status)}</span>
+            <span class="muted" style="font-size:12px">· ${esc(s.model)} · ${esc(s.prompt_version)} · ${fmt(s.latency_ms)} ms · ${fmt(s.prompt_tokens)}→${fmt(s.completion_tokens)} tokens${s.finish_reason === 'length' ? ' · cut off' : ''} · ${when(s.created_at)}</span>
+            · <a href="/wells/${encodeURIComponent(s.lookup_api)}" target="_blank" rel="noopener">well page</a>
+            · <a href="/api/ks/wells/${encodeURIComponent(s.lookup_api)}" target="_blank" rel="noopener">well data</a></div>
+          <p>${esc(s.summary)}</p>
+          <details><summary class="muted">Facts sent to the model</summary><pre>${esc(JSON.stringify(s.input_json, null, 2))}</pre></details>
+          <div class="btns" style="margin-top:8px">
+            <button class="ok" data-rev="${s.id}" data-s="approved">Approve</button>
+            <button class="danger" data-rev="${s.id}" data-s="rejected">Reject</button>
+            <button data-rev="${s.id}" data-s="draft">Back to draft</button>
+          </div>
+        </div>
+      `).join('') : 'No summaries match this filter.';
+      $('summaries').querySelectorAll('button[data-rev]').forEach((btn) => {
+        btn.onclick = async () => {
+          await api(`/api/admin/ai-summaries/summaries/${btn.dataset.rev}`, {
+            method: 'PATCH',
+            body: JSON.stringify({ review_status: btn.dataset.s }),
+          });
+          await loadSummaries();
+        };
+      });
+    }
+
+    $('filter').onchange = () => { sumOffset = 0; loadSummaries(); };
+    $('scope').onchange = () => { sumOffset = 0; loadSummaries(); };
+    $('refreshSum').onclick = () => loadSummaries();
+    $('prev').onclick = () => { sumOffset = Math.max(0, sumOffset - 25); loadSummaries(); };
+    $('next').onclick = () => { sumOffset += 25; loadSummaries(); };
+
+    (async () => {
+      try { await loadRuns(); await pollRun(); await loadSummaries(); await refreshCandidates(true); }
+      catch (e) { showErr(e.message); }
+    })();
+  </script>
+</body>
+</html>
