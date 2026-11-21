@@ -29,7 +29,7 @@ use std::{
 };
 use uuid::Uuid;
 
-pub const PROMPT_VERSION: &str = "ks-well-summary-v2";
+pub const PROMPT_VERSION: &str = "ks-well-summary-v3";
 const DEFAULT_MODEL: &str = "Qwen/Qwen3-30B-A3B-Instruct-2507";
 const MAX_WELLS_PER_RUN: i64 = 20_000;
 const MAX_CONCURRENCY: i64 = 256;
@@ -488,7 +488,21 @@ struct StartRunRequest {
     concurrency: Option<i64>,
     activity_since: Option<chrono::NaiveDate>,
     force: Option<bool>,
+    mode: Option<String>,
 }
+
+const KS_SOURCE_FINGERPRINT_SQL: &str = "
+    md5(
+        COALESCE(w.well_name, '') || '|' ||
+        COALESCE(w.lifecycle_status, '') || '|' ||
+        COALESCE(w.permit_date::text, '') || '|' ||
+        COALESCE(w.spud_date::text, '') || '|' ||
+        COALESCE(w.completion_date::text, '') || '|' ||
+        COALESCE(w.plug_date::text, '') || '|' ||
+        COALESCE((SELECT MAX(COALESCE(e.occurred_at, e.published_at)::date)::text || ':' || COUNT(*)::text FROM ks_event e WHERE e.related_well_id = w.internal_well_id AND COALESCE(e.occurred_at, e.published_at)::date >= $1), '') || '|' ||
+        COALESCE((SELECT MAX(d.filing_date)::text || ':' || COUNT(*)::text FROM ks_well_document d WHERE d.well_id = w.internal_well_id AND d.public_access_state = 'public' AND d.filing_date >= $1), '')
+    )
+";
 
 struct ActiveSlot {
     run_id: i64,
@@ -567,6 +581,7 @@ async fn start_run(
     let concurrency = body.concurrency.unwrap_or(64).clamp(1, MAX_CONCURRENCY);
     let since = body.activity_since.unwrap_or_else(default_since);
     let force = body.force.unwrap_or(false);
+    let mode = body.mode.as_deref().map(str::trim).unwrap_or("pending");
     let client = http_client()?;
 
     let mut slot = ActiveSlot::acquire(-1)?;
@@ -592,6 +607,28 @@ async fn start_run(
 
     slot.bind_run_id(run_id);
 
+    let filter_sql = if force {
+        "TRUE".to_owned()
+    } else if mode == "changed" {
+        format!(
+            "NOT EXISTS ( \
+                SELECT 1 FROM ks_well_ai_summaries s \
+                WHERE s.well_id = w.internal_well_id \
+                  AND s.model = $2 \
+                  AND s.prompt_version = $3 \
+                  AND (s.review_status = 'rejected' OR s.source_fingerprint = ({KS_SOURCE_FINGERPRINT_SQL})) \
+            )"
+        )
+    } else {
+        "NOT EXISTS ( \
+            SELECT 1 FROM ks_well_ai_summaries s \
+            WHERE s.well_id = w.internal_well_id \
+              AND s.model = $2 \
+              AND s.prompt_version = $3 \
+        )"
+        .to_owned()
+    };
+
     let selected: i64 = sqlx::query_scalar(&format!(
         r#"
         {CANDIDATE_ACTIVITY_SQL},
@@ -602,18 +639,13 @@ async fn start_run(
             FROM recent_wells rw
             JOIN ks_well w ON w.internal_well_id = rw.well_id
             WHERE {IDENTITY_SQL} AND {RECENT_SPUD_SQL}
-              AND ($4 OR NOT EXISTS (
-                  SELECT 1 FROM ks_well_ai_summaries s
-                  WHERE s.well_id = w.internal_well_id
-                    AND s.model = $2
-                    AND s.prompt_version = $3
-              ))
+              AND ({filter_sql})
             ORDER BY rw.latest_date DESC, w.internal_well_id
-            LIMIT $5
+            LIMIT $4
         ),
         inserted AS (
             INSERT INTO ks_ai_summary_run_items (run_id, well_id, lookup_api, latest_activity_date)
-            SELECT $6, well_id, lookup_api, latest_date FROM picked
+            SELECT $5, well_id, lookup_api, latest_date FROM picked
             RETURNING well_id
         )
         SELECT count(*)::bigint FROM inserted
@@ -622,7 +654,6 @@ async fn start_run(
     .bind(since)
     .bind(&model)
     .bind(PROMPT_VERSION)
-    .bind(force)
     .bind(well_limit)
     .bind(run_id)
     .fetch_one(&state.pool)
@@ -1731,6 +1762,30 @@ fn condition_contradiction(lower: &str, input: &Value) -> Option<String> {
             }
         }
     }
+    if !past_permit {
+        for claim in [
+            "is drilling",
+            "drilling a new",
+            "currently drilling",
+            "being drilled",
+        ] {
+            if lower.contains(claim) {
+                return Some(format!(
+                    "claims \"{claim}\" without spud, completion, or production evidence"
+                ));
+            }
+        }
+    }
+    if lower.contains("holds the lease") {
+        return Some("conflates operator with leaseholder ('holds the lease')".to_owned());
+    }
+    if lower.contains("over its lifetime")
+        || lower.contains("lifetime production")
+        || lower.contains("since the well began operating")
+        || lower.contains("since it began operating")
+    {
+        return Some("claims unverified lifetime/initial operating history".to_owned());
+    }
     let facts = input.to_string().to_ascii_lowercase();
     if (lower.contains("not active") || lower.contains("no longer active"))
         && !facts.contains("inactive")
@@ -2253,15 +2308,53 @@ async fn flush_batch(
                 latency_ms,
                 attempts,
             } => {
+                let source_fingerprint: Option<String> = sqlx::query_scalar(&format!(
+                    "SELECT {KS_SOURCE_FINGERPRINT_SQL} \
+                     FROM ks_well w \
+                     CROSS JOIN (SELECT activity_since FROM ks_ai_summary_runs WHERE id = $2) r \
+                     WHERE w.internal_well_id = $3 AND ($1::date IS NOT NULL)"
+                ))
+                .bind(chrono::NaiveDate::from_ymd_opt(2025, 1, 1))
+                .bind(run_id)
+                .bind(well_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| format!("computing source fingerprint: {e}"))?;
+
+                let was_approved: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM ks_well_ai_summaries WHERE well_id = $1 AND review_status = 'approved')",
+                )
+                .bind(well_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| format!("checking prior approval: {e}"))?;
+
+                if was_approved {
+                    sqlx::query(
+                        "UPDATE ks_well_ai_summaries SET review_status = 'draft' WHERE well_id = $1 AND review_status = 'approved'",
+                    )
+                    .bind(well_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| format!("superseding prior approved summary: {e}"))?;
+                }
+
+                let review_status = if was_approved { "approved" } else { "draft" };
+                let reviewed_by: Option<&str> = if was_approved { Some("weekly-refresh") } else { None };
+
                 let summary_id: i64 = sqlx::query_scalar(
                     "INSERT INTO ks_well_ai_summaries \
-                     (well_id, lookup_api, run_id, model, prompt_version, input_sha256, input_json, \
-                      summary, finish_reason, prompt_tokens, completion_tokens, latency_ms) \
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
+                     (well_id, lookup_api, run_id, model, prompt_version, input_sha256, source_fingerprint, input_json, \
+                      summary, finish_reason, prompt_tokens, completion_tokens, latency_ms, review_status, reviewed_by, reviewed_at) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, CASE WHEN $14 = 'approved' THEN now() ELSE NULL END) \
                      ON CONFLICT (well_id, model, prompt_version, input_sha256) DO UPDATE \
                      SET summary = EXCLUDED.summary, run_id = EXCLUDED.run_id, \
+                         source_fingerprint = EXCLUDED.source_fingerprint, \
                          finish_reason = EXCLUDED.finish_reason, prompt_tokens = EXCLUDED.prompt_tokens, \
-                         completion_tokens = EXCLUDED.completion_tokens, latency_ms = EXCLUDED.latency_ms \
+                         completion_tokens = EXCLUDED.completion_tokens, latency_ms = EXCLUDED.latency_ms, \
+                         review_status = CASE WHEN ks_well_ai_summaries.review_status = 'approved' OR EXCLUDED.review_status = 'approved' THEN 'approved' ELSE ks_well_ai_summaries.review_status END, \
+                         reviewed_by = COALESCE(EXCLUDED.reviewed_by, ks_well_ai_summaries.reviewed_by), \
+                         reviewed_at = CASE WHEN EXCLUDED.review_status = 'approved' THEN now() ELSE ks_well_ai_summaries.reviewed_at END \
                      RETURNING id",
                 )
                 .bind(well_id)
@@ -2270,12 +2363,15 @@ async fn flush_batch(
                 .bind(model)
                 .bind(PROMPT_VERSION)
                 .bind(&input_sha256)
+                .bind(&source_fingerprint)
                 .bind(&input_json)
                 .bind(&output.summary)
                 .bind(&output.finish_reason)
                 .bind(output.prompt_tokens.map(|v| v as i32))
                 .bind(output.completion_tokens.map(|v| v as i32))
                 .bind(latency_ms)
+                .bind(review_status)
+                .bind(reviewed_by)
                 .fetch_one(&mut *tx)
                 .await
                 .map_err(|e| format!("saving summary: {e}"))?;

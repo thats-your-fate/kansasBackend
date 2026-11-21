@@ -84,3 +84,6 @@ CREATE TABLE IF NOT EXISTS ks_ai_summary_log (
 );
 CREATE INDEX IF NOT EXISTS idx_ks_ai_summary_log_run
     ON ks_ai_summary_log(run_id, id);
+
+ALTER TABLE ks_well_ai_summaries
+    ADD COLUMN IF NOT EXISTS source_fingerprint TEXT;
