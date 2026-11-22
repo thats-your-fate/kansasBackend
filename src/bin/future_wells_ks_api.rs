@@ -15,6 +15,7 @@ async fn main() -> anyhow::Result<()> {
     sqlx::migrate!("./migrations").run(&pool).await?;
     api::ai_summaries::ensure_schema(&pool).await?;
     api::ai_summaries::mark_interrupted_runs(&pool).await?;
+    api::ai_summary_status::spawn(pool.clone());
     let ai_worker_pool = db::connect_ai_summary_worker_lazy(&cfg.database_url)?;
 
     let addr = format!("{}:{}", cfg.api_host, cfg.api_port);
