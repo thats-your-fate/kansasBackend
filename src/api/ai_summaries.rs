@@ -72,6 +72,8 @@ pub struct AiState {
     ai_worker_pool: Option<PgPool>,
 }
 
+include!("ai_summary_count.rs");
+
 static ACTIVE_RUN: Mutex<Option<ActiveRun>> = Mutex::new(None);
 
 struct ActiveRun {
@@ -108,7 +110,7 @@ pub fn routes(pool: PgPool, ai_worker_pool: Option<PgPool>) -> Router {
     Router::new()
         .route("/app/ai-summaries", get(page))
         .route("/api/admin/ai-summaries/app", get(page))
-        .route("/api/admin/ai-summaries/candidates", get(candidates))
+        .route("/api/admin/ai-summaries/candidates", get(candidates).layer(axum::middleware::map_response(count_no_store)))
         .route("/api/admin/ai-summaries/test-endpoint", post(test_endpoint))
         .route(
             "/api/admin/ai-summaries/runs",
@@ -320,6 +322,8 @@ fn short_error(error: &reqwest::Error) -> String {
 
 #[derive(Deserialize)]
 struct CandidatesQuery {
+    exact: Option<bool>,
+    scan_id: Option<String>,
     since: Option<chrono::NaiveDate>,
     model: Option<String>,
     force: Option<bool>,
@@ -389,6 +393,28 @@ async fn candidates(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or(DEFAULT_MODEL);
+    if query.exact.unwrap_or(false) || query.scan_id.is_some() {
+        if since < default_since() || model.len() > 200 {
+            return Err(ApiError::BadRequest(
+                "Use an activity date from 2025-01-01 and a model name of at most 200 characters"
+                    .to_owned(),
+            ));
+        }
+        let (progress, start) = reserve_count(&since.to_string(), model, query.scan_id.as_deref())
+            .map_err(ApiError::BadRequest)?;
+        if start {
+            spawn_exact_count(
+                worker_pool(&state),
+                since,
+                model.to_owned(),
+                progress.clone(),
+            );
+        }
+        return Ok(Json(
+            count_snapshot(&progress).map_err(ApiError::BadRequest)?,
+        ));
+    }
+
     let force = query.force.unwrap_or(false);
 
     let row = sqlx::query(&format!(
@@ -624,6 +650,7 @@ async fn start_run(
             missing_only,
             well_limit,
             &cancel,
+            None,
         )
         .await
         {
@@ -2498,6 +2525,7 @@ async fn plan_changed_wells(
     missing_only: bool,
     limit: i64,
     cancel: &AtomicBool,
+    count: Option<&Mutex<SummaryCount>>,
 ) -> anyhow::Result<()> {
     let rows = sqlx::query(&format!(r#"{CANDIDATE_ACTIVITY_SQL},
         summary_candidates AS (
@@ -2522,16 +2550,21 @@ async fn plan_changed_wells(
     .bind(PROMPT_VERSION)
         .fetch_all(pool)
         .await?;
+    if let Some(count) = count {
+        count_total(count, rows.len())?;
+    }
     let mut selected = 0_i64;
     let mut unchanged = 0_i64;
-    log(
-        pool,
-        run_id,
-        "info",
-        None,
-        "Checking public facts; only new or changed inputs will be queued.",
-    )
-    .await;
+    if count.is_none() {
+        log(
+            pool,
+            run_id,
+            "info",
+            None,
+            "Checking public facts; only new or changed inputs will be queued.",
+        )
+        .await;
+    }
     // Snapshot only candidate identities once. Repeating the eligibility aggregation for
     // every page would rescan the state's production/activity inventory unnecessarily.
     for chunk in rows.chunks(250) {
@@ -2550,9 +2583,17 @@ async fn plan_changed_wells(
                 .map_err(|error| anyhow::anyhow!("building public facts: {error:?}"))?
             {
                 Some(input) => input,
-                None => continue,
+                None => {
+                    if let Some(count) = count {
+                        count_record(count, None)?;
+                    }
+                    continue;
+                }
             };
             if !has_public_identity(&input) {
+                if let Some(count) = count {
+                    count_record(count, None)?;
+                }
                 continue;
             }
 
@@ -2567,6 +2608,10 @@ async fn plan_changed_wells(
             .bind(&input)
             .fetch_optional(pool)
             .await?;
+            if let Some(count) = count {
+                count_record(count, Some(saved))?;
+                continue;
+            }
             if !should_queue_summary(force, missing_only, saved) {
                 unchanged += 1;
                 continue;
@@ -2585,18 +2630,22 @@ async fn plan_changed_wells(
             tx.commit().await?;
             selected += inserted;
         }
-        log(
-            pool,
-            run_id,
-            "info",
-            None,
-            &format!(
+        if count.is_none() {
+            log(
+                pool,
+                run_id,
+                "info",
+                None,
+                &format!(
                 "Checking facts: {selected} queued, {unchanged} unchanged or already summarised."
             ),
-        )
-        .await;
+            )
+            .await;
+        }
     }
-    log(pool, run_id, "info", None, &format!("Selection complete: {selected} queued, {unchanged} unchanged or already summarised; generation limit {limit}.")).await;
+    if count.is_none() {
+        log(pool, run_id, "info", None, &format!("Selection complete: {selected} queued, {unchanged} unchanged or already summarised; generation limit {limit}.")).await;
+    }
     Ok(())
 }
 
@@ -2649,4 +2698,38 @@ mod changed_selection_tests {
         ));
         assert!(!should_queue_summary(false, false, Some(true)));
     }
+}
+
+fn spawn_exact_count(
+    pool: PgPool,
+    since: chrono::NaiveDate,
+    model: String,
+    progress: Arc<Mutex<SummaryCount>>,
+) {
+    tokio::spawn(async move {
+        let _guard = CountTaskGuard(progress.clone());
+        // A separate single connection enforces read-only operation in PostgreSQL,
+        // without holding a transaction over the entire inventory scan.
+        let result: anyhow::Result<()> = async {
+            let readonly = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .acquire_timeout(Duration::from_secs(15))
+                .after_connect(|connection, _| Box::pin(async move {
+                    sqlx::query("SELECT set_config('default_transaction_read_only', 'on', false), set_config('statement_timeout', '30s', false), set_config('lock_timeout', '3s', false), set_config('max_parallel_workers_per_gather', '0', false), set_config('application_name', 'ai-summary-count', false)")
+                        .execute(&mut *connection).await?;
+                    Ok(())
+                }))
+                .connect_with(pool.connect_options().as_ref().clone()).await?;
+            let cancel = AtomicBool::new(false);
+            let result = plan_changed_wells(&readonly, 0, &model, since, false, false, i64::MAX, &cancel, Some(progress.as_ref())).await;
+            readonly.close().await;
+            result
+        }.await;
+        finish_count(
+            &progress,
+            result.map_err(|_| {
+                "Could not finish reading current well facts. Count wells again.".to_owned()
+            }),
+        );
+    });
 }

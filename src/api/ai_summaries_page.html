@@ -78,6 +78,7 @@
         </div>
         <div id="summarySelectionPanel" role="tabpanel" aria-labelledby="changedTab">
         <p id="selectionDescription" class="note">Includes new wells and existing summaries whose source facts changed. Unchanged wells are skipped.</p>
+        <div id="changeCount" class="note" role="status" aria-live="polite" style="white-space:pre-line;padding:8px;background:var(--soft, #edf2f5);border-radius:6px">Count new or changed wells before starting.</div>
         <label for="endpoints">Endpoint URLs (one per GPU, one per line)</label>
         <textarea id="endpoints" placeholder="http://123.45.67.89:10100&#10;http://123.45.67.89:10200"></textarea>
         <label for="token">Box token (kept in memory only)</label>
@@ -224,23 +225,6 @@
         }
       } catch (e) { showErr(e.message); $('info').textContent = ''; }
     };
-
-    async function refreshCandidates(applySuggested = true) {
-      showErr('');
-      $('info').textContent = 'Counting candidates…';
-      try {
-        const p = new URLSearchParams({
-          since: $('since').value, model: $('model').value.trim(), force: String($('force').checked),
-        });
-        const r = await api('/api/admin/ai-summaries/candidates?' + p);
-        $('info').textContent = `${fmt(r.eligible_wells)} eligible wells; ${fmt(r.pending_wells)} have no summary (or are selected by force). Changed facts are checked before queueing when you start; the generation limit stays at ${fmt($('limit').value)}.`;
-      } catch (e) { showErr(e.message); $('info').textContent = ''; }
-    }
-
-    $('count').onclick = () => { limitTouched = false; refreshCandidates(true); };
-    $('since').onchange = () => refreshCandidates(!limitTouched);
-    $('model').onchange = () => refreshCandidates(!limitTouched);
-    $('force').onchange = () => refreshCandidates(!limitTouched);
 
     $('start').onclick = async () => {
       showErr('');
@@ -405,7 +389,7 @@
     $('next').onclick = () => { sumOffset += 25; loadSummaries(); };
 
     (async () => {
-      try { await loadRuns(); await pollRun(); await loadSummaries(); await refreshCandidates(true); }
+      try { await loadRuns(); await pollRun(); await loadSummaries(); }
       catch (e) { showErr(e.message); }
     })();
   </script>
@@ -439,6 +423,62 @@
     };
   }
   selectTab(false, false);
+})();
+</script>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const fmt = (n) => Number(n || 0).toLocaleString();
+  let revision = 0, result = null;
+  const filters = () => ({ since: $('since').value || '2025-01-01', model: $('model').value.trim() || 'Qwen/Qwen3-30B-A3B-Instruct-2507' });
+  const key = () => JSON.stringify(filters());
+  function render() {
+    $('count').textContent = $('force').checked ? 'Count eligible wells' : 'Count new / changed';
+    if (!result) return;
+    const selected = $('force').checked ? result.eligible_wells : result.new_or_changed_wells;
+    const maximum = Math.max(0, Math.trunc(Number($('limit').value) || 0));
+    $('changeCount').textContent = `${fmt(result.new_or_changed_wells)} new or changed wells\n${fmt(result.new_wells)} new · ${fmt(result.changed_wells)} changed · ${fmt(result.unchanged_wells)} unchanged` +
+      (result.excluded_wells ? ` · ${fmt(result.excluded_wells)} excluded` : '') +
+      `\n${fmt(Math.min(selected, maximum))} wells at most for the next run with your current limit.` +
+      `\nChecked ${new Date(result.checked_at).toLocaleString()}. Facts are checked again when a run starts.`;
+  }
+  function invalidate() {
+    revision++; result = null; $('count').disabled = false;
+    $('changeCount').textContent = 'Count new or changed wells before starting.';
+    render();
+  }
+  async function count() {
+    const own = ++revision, selectedFilters = filters(), selectedKey = key();
+    result = null; $('count').disabled = true;
+    $('changeCount').textContent = 'Finding eligible wells…';
+    try {
+      const params = new URLSearchParams({ since: selectedFilters.since, activity_since: selectedFilters.since, model: selectedFilters.model, exact: 'true' });
+      for (;;) {
+        const response = await fetch('/api/admin/ai-summaries/candidates?' + params, { credentials: 'same-origin', cache: 'no-store' });
+        const data = await response.json().catch(() => ({}));
+        if (own !== revision || key() !== selectedKey) return;
+        if (!response.ok) throw new Error((typeof data.error === 'string' ? data.error : data.error?.message) || `Could not count wells (HTTP ${response.status})`);
+        if (data.status === 'failed') throw new Error(data.error || 'Count did not finish; count wells again.');
+        if (data.status === 'completed' && data.exact === true) { result = data; render(); return; }
+        if (data.status !== 'scanning' || !data.scan_id) throw new Error('Exact counting is unavailable; reload the page and count again.');
+        $('changeCount').textContent = data.total_candidates === null ? 'Finding eligible wells…' :
+          `Checking facts: ${fmt(data.scanned)} / ${fmt(data.total_candidates)} wells\n${fmt(data.new_or_changed_wells)} new or changed so far.`;
+        params.set('scan_id', data.scan_id);
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+        if (own !== revision || key() !== selectedKey) return;
+      }
+    } catch (error) {
+      if (own === revision) $('changeCount').textContent = 'Count unavailable: ' + error.message;
+    } finally {
+      if (own === revision) $('count').disabled = false;
+    }
+  }
+  $('count').onclick = count;
+  $('since').onchange = invalidate;
+  $('model').onchange = invalidate;
+  $('force').onchange = render;
+  $('limit').addEventListener('input', render);
+  invalidate();
 })();
 </script>
 </body>
