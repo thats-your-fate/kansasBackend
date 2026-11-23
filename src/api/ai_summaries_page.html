@@ -78,7 +78,7 @@
         </div>
         <div id="summarySelectionPanel" role="tabpanel" aria-labelledby="changedTab">
         <p id="selectionDescription" class="note">Includes new wells and existing summaries whose source facts changed. Unchanged wells are skipped.</p>
-        <div id="changeCount" class="note" role="status" aria-live="polite" style="white-space:pre-line;padding:8px;background:var(--soft, #edf2f5);border-radius:6px">Count new or changed wells before starting.</div>
+        <div id="changeCount" class="note" role="status" aria-live="polite" style="white-space:pre-line;padding:8px;background:var(--soft, #edf2f5);border-radius:6px">Finding new or changed wells…</div>
         <label for="endpoints">Endpoint URLs (one per GPU, one per line)</label>
         <textarea id="endpoints" placeholder="http://123.45.67.89:10100&#10;http://123.45.67.89:10200"></textarea>
         <label for="token">Box token (kept in memory only)</label>
@@ -97,6 +97,7 @@
           <button id="test" type="button">Test box</button>
           <button id="count" type="button">Count wells</button>
           <button id="start" class="primary" type="button">Run new or changed wells</button>
+        <p id="scheduleCount" role="status" aria-live="polite" style="font-weight:600;margin:8px 0">Calculating how many wells will be scheduled…</p>
         </div>
         <div id="info" class="muted" style="margin-top:10px"></div>
         <div id="err" class="errbox"></div>
@@ -429,38 +430,57 @@
 (() => {
   const $ = (id) => document.getElementById(id);
   const fmt = (n) => Number(n || 0).toLocaleString();
-  let revision = 0, result = null;
+  const wells = (n) => `${fmt(n)} ${n === 1 ? 'well' : 'wells'}`;
+  let revision = 0, result = null, debounce;
   const filters = () => ({ since: $('since').value || '2025-01-01', model: $('model').value.trim() || 'Qwen/Qwen3-30B-A3B-Instruct-2507' });
   const key = () => JSON.stringify(filters());
   function render() {
-    $('count').textContent = $('force').checked ? 'Count eligible wells' : 'Count new / changed';
+    $('count').textContent = 'Refresh count';
+    $('start').textContent = $('force').checked ? 'Regenerate all eligible wells' : 'Run new or changed wells';
     if (!result) return;
     const selected = $('force').checked ? result.eligible_wells : result.new_or_changed_wells;
-    const maximum = Math.max(0, Math.trunc(Number($('limit').value) || 0));
+    const input = $('limit');
+    const maximum = Math.trunc(Number(input.value));
+    const valid = Number.isFinite(maximum) && maximum >= Number(input.min || 1) && maximum <= Number(input.max || 20000);
+    const scheduled = valid ? Math.min(selected, maximum) : null;
+    $('scheduleCount').textContent = scheduled === null ? 'Enter a valid run limit to see how many wells will be scheduled.' :
+      `${wells(scheduled)} will be scheduled` + (selected > scheduled ? ` (${fmt(selected)} available; limit ${fmt(maximum)}).` : '.');
+    if (scheduled !== null) $('start').textContent = `${$('force').checked ? 'Regenerate' : 'Run'} ${wells(scheduled)}`;
     $('changeCount').textContent = `${fmt(result.new_or_changed_wells)} new or changed wells\n${fmt(result.new_wells)} new · ${fmt(result.changed_wells)} changed · ${fmt(result.unchanged_wells)} unchanged` +
       (result.excluded_wells ? ` · ${fmt(result.excluded_wells)} excluded` : '') +
-      `\n${fmt(Math.min(selected, maximum))} wells at most for the next run with your current limit.` +
       `\nChecked ${new Date(result.checked_at).toLocaleString()}. Facts are checked again when a run starts.`;
   }
   function invalidate() {
-    revision++; result = null; $('count').disabled = false;
-    $('changeCount').textContent = 'Count new or changed wells before starting.';
+    revision++; result = null; clearTimeout(debounce); $('count').disabled = false;
+    $('changeCount').textContent = 'Finding new or changed wells…';
+    $('scheduleCount').textContent = 'Calculating how many wells will be scheduled…';
     render();
+    debounce = setTimeout(count, 600);
   }
   async function count() {
+    clearTimeout(debounce);
     const own = ++revision, selectedFilters = filters(), selectedKey = key();
     result = null; $('count').disabled = true;
     $('changeCount').textContent = 'Finding eligible wells…';
+    $('scheduleCount').textContent = 'Calculating how many wells will be scheduled…';
+    render();
     try {
       const params = new URLSearchParams({ since: selectedFilters.since, activity_since: selectedFilters.since, model: selectedFilters.model, exact: 'true' });
       for (;;) {
         const response = await fetch('/api/admin/ai-summaries/candidates?' + params, { credentials: 'same-origin', cache: 'no-store' });
         const data = await response.json().catch(() => ({}));
         if (own !== revision || key() !== selectedKey) return;
-        if (!response.ok) throw new Error((typeof data.error === 'string' ? data.error : data.error?.message) || `Could not count wells (HTTP ${response.status})`);
-        if (data.status === 'failed') throw new Error(data.error || 'Count did not finish; count wells again.');
+        const error = (typeof data.error === 'string' ? data.error : data.error?.message) || `Could not count wells (HTTP ${response.status})`;
+        if (!response.ok && error.includes('Another count is in progress')) {
+          $('changeCount').textContent = 'Waiting for the current count to finish before checking these filters…';
+          await new Promise((resolve) => setTimeout(resolve, 5000));
+          if (own !== revision || key() !== selectedKey) return;
+          continue;
+        }
+        if (!response.ok) throw new Error(error);
+        if (data.status === 'failed') throw new Error(data.error || 'Count did not finish; refresh the count.');
         if (data.status === 'completed' && data.exact === true) { result = data; render(); return; }
-        if (data.status !== 'scanning' || !data.scan_id) throw new Error('Exact counting is unavailable; reload the page and count again.');
+        if (data.status !== 'scanning' || !data.scan_id) throw new Error('Exact counting is unavailable; reload the page and try again.');
         $('changeCount').textContent = data.total_candidates === null ? 'Finding eligible wells…' :
           `Checking facts: ${fmt(data.scanned)} / ${fmt(data.total_candidates)} wells\n${fmt(data.new_or_changed_wells)} new or changed so far.`;
         params.set('scan_id', data.scan_id);
@@ -468,14 +488,19 @@
         if (own !== revision || key() !== selectedKey) return;
       }
     } catch (error) {
-      if (own === revision) $('changeCount').textContent = 'Count unavailable: ' + error.message;
+      if (own === revision) {
+        $('changeCount').textContent = 'Count unavailable: ' + error.message;
+        $('scheduleCount').textContent = 'Scheduled count unavailable. Use Refresh count to try again.';
+      }
     } finally {
       if (own === revision) $('count').disabled = false;
     }
   }
   $('count').onclick = count;
-  $('since').onchange = invalidate;
-  $('model').onchange = invalidate;
+  for (const id of ['since', 'model']) {
+    $(id).addEventListener('input', invalidate);
+    $(id).onchange = invalidate;
+  }
   $('force').onchange = render;
   $('limit').addEventListener('input', render);
   invalidate();
