@@ -441,7 +441,7 @@
     const selected = $('force').checked ? result.eligible_wells : result.new_or_changed_wells;
     const input = $('limit');
     const maximum = Math.trunc(Number(input.value));
-    const valid = Number.isFinite(maximum) && maximum >= Number(input.min || 1) && maximum <= Number(input.max || 20000);
+    const valid = Number.isInteger(Number(input.value)) && maximum >= Number(input.min || 1) && maximum <= Number(input.max || 20000);
     const scheduled = valid ? Math.min(selected, maximum) : null;
     $('scheduleCount').textContent = scheduled === null ? 'Enter a valid run limit to see how many wells will be scheduled.' :
       `${wells(scheduled)} will be scheduled` + (selected > scheduled ? ` (${fmt(selected)} available; limit ${fmt(maximum)}).` : '.');
