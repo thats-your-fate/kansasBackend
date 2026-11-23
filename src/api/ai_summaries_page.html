@@ -54,6 +54,9 @@
     .errbox { margin-top:10px; padding:9px 11px; border-radius:6px; background:#fbe9e8; color:var(--err); font-size:13px; display:none; }
     .check { display:flex; align-items:center; gap:8px; margin-top:10px; font-size:13px; color:var(--ink); }
     .check input { width:auto; }
+      .selection-tabs { display:flex; gap:4px; margin:8px 0 12px; border-bottom:1px solid var(--line, #d8dee3); padding-bottom:6px; }
+    .selection-tabs [aria-selected="true"] { color:var(--accent, #1f5f99); border-color:var(--accent, #1f5f99); font-weight:600; }
+    .selection-tabs button:focus-visible { outline:2px solid var(--accent, #1f5f99); outline-offset:2px; }
   </style>
 </head>
 <body>
@@ -68,7 +71,13 @@
   <main>
     <div>
       <section class="card">
-        <h2>Inference box</h2>
+        <h2>Summary run</h2>
+        <div class="selection-tabs" role="tablist" aria-label="Wells to summarise">
+          <button id="changedTab" type="button" role="tab" aria-selected="true" aria-controls="summarySelectionPanel">Changed wells</button>
+          <button id="allTab" type="button" role="tab" aria-selected="false" aria-controls="summarySelectionPanel" tabindex="-1">All eligible wells</button>
+        </div>
+        <div id="summarySelectionPanel" role="tabpanel" aria-labelledby="changedTab">
+        <p id="selectionDescription" class="note">Includes new wells and existing summaries whose source facts changed. Unchanged wells are skipped.</p>
         <label for="endpoints">Endpoint URLs (one per GPU, one per line)</label>
         <textarea id="endpoints" placeholder="http://123.45.67.89:10100&#10;http://123.45.67.89:10200"></textarea>
         <label for="token">Box token (kept in memory only)</label>
@@ -76,20 +85,21 @@
         <label for="model">Model</label>
         <input id="model" value="Qwen/Qwen3-30B-A3B-Instruct-2507">
         <div class="row">
-          <div><label for="limit">Wells</label><input id="limit" type="number" min="1" max="20000" value="2000"></div>
+          <div><label for="limit">Maximum summaries to generate</label><input id="limit" type="number" min="1" max="20000" value="2000"></div>
           <div><label for="concurrency">In-flight requests</label><input id="concurrency" type="number" min="1" max="256" value="128"></div>
         </div>
         <div class="row">
           <div><label for="since">Active since</label><input id="since" type="date" value="2025-01-01"></div>
-          <div style="display:flex;align-items:end;"><label class="check"><input id="force" type="checkbox"> Regenerate existing</label></div>
+          <input id="force" type="checkbox" hidden>
         </div>
         <div class="btns">
           <button id="test" type="button">Test box</button>
           <button id="count" type="button">Count wells</button>
-          <button id="start" class="primary" type="button">Start run</button>
+          <button id="start" class="primary" type="button">Run new or changed wells</button>
         </div>
         <div id="info" class="muted" style="margin-top:10px"></div>
         <div id="err" class="errbox"></div>
+      </div>
       </section>
 
       <section class="card">
@@ -194,6 +204,7 @@
         concurrency: Number($('concurrency').value),
         activity_since: $('since').value,
         force: $('force').checked,
+        mode: 'changed',
       };
     }
 
@@ -222,14 +233,7 @@
           since: $('since').value, model: $('model').value.trim(), force: String($('force').checked),
         });
         const r = await api('/api/admin/ai-summaries/candidates?' + p);
-        const pending = Number(r.pending_wells) || 0;
-        const suggested = Math.min(20000, Math.max(1, pending));
-        if (applySuggested && pending > 0) {
-          $('limit').value = String(suggested);
-        }
-        $('info').textContent = pending > 0
-          ? `${fmt(r.eligible_wells)} wells active since ${r.activity_since}; ${fmt(pending)} pending${applySuggested ? ` (set Wells to ${fmt(suggested)})` : ''}.`
-          : `${fmt(r.eligible_wells)} wells active since ${r.activity_since}; 0 pending.`;
+        $('info').textContent = `${fmt(r.eligible_wells)} eligible wells; ${fmt(r.pending_wells)} have no summary (or are selected by force). Changed facts are checked before queueing when you start; the generation limit stays at ${fmt($('limit').value)}.`;
       } catch (e) { showErr(e.message); $('info').textContent = ''; }
     }
 
@@ -405,5 +409,37 @@
       catch (e) { showErr(e.message); }
     })();
   </script>
+<script>
+(() => {
+  const changed = document.getElementById('changedTab');
+  const all = document.getElementById('allTab');
+  const force = document.getElementById('force');
+  function selectTab(regenerateAll, refresh = true) {
+    force.checked = regenerateAll;
+    for (const [button, selected] of [[changed, !regenerateAll], [all, regenerateAll]]) {
+      button.setAttribute('aria-selected', String(selected));
+      button.tabIndex = selected ? 0 : -1;
+    }
+    document.getElementById('summarySelectionPanel').setAttribute('aria-labelledby', regenerateAll ? 'allTab' : 'changedTab');
+    document.getElementById('selectionDescription').textContent = regenerateAll
+      ? 'Regenerates eligible wells, including unchanged summaries, up to your generation limit.'
+      : 'Includes new wells and existing summaries whose source facts changed. Unchanged wells are skipped.';
+    document.getElementById('start').textContent = regenerateAll ? 'Regenerate all eligible wells' : 'Run new or changed wells';
+    if (refresh && force.onchange) force.onchange();
+  }
+  changed.onclick = () => selectTab(false);
+  all.onclick = () => selectTab(true);
+  for (const button of [changed, all]) {
+    button.onkeydown = (event) => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+      event.preventDefault();
+      const next = event.key === 'Home' ? changed : event.key === 'End' ? all : button === changed ? all : changed;
+      selectTab(next === all);
+      next.focus();
+    };
+  }
+  selectTab(false, false);
+})();
+</script>
 </body>
 </html>

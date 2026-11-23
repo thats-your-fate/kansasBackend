@@ -581,7 +581,11 @@ async fn start_run(
     let concurrency = body.concurrency.unwrap_or(64).clamp(1, MAX_CONCURRENCY);
     let since = body.activity_since.unwrap_or_else(default_since);
     let force = body.force.unwrap_or(false);
-    let mode = body.mode.as_deref().map(str::trim).unwrap_or("pending");
+    let missing_only = match body.mode.as_deref().map(str::trim).unwrap_or("changed") {
+        "changed" => false,
+        "pending" => true,
+        _ => return Err(ApiError::bad_request("mode must be changed or pending")),
+    };
     let client = http_client()?;
 
     let mut slot = ActiveSlot::acquire(-1)?;
@@ -607,97 +611,31 @@ async fn start_run(
 
     slot.bind_run_id(run_id);
 
-    let filter_sql = if force {
-        "TRUE".to_owned()
-    } else if mode == "changed" {
-        format!(
-            "NOT EXISTS ( \
-                SELECT 1 FROM ks_well_ai_summaries s \
-                WHERE s.well_id = w.internal_well_id \
-                  AND s.model = $2 \
-                  AND s.prompt_version = $3 \
-                  AND (s.review_status = 'rejected' OR s.source_fingerprint = ({KS_SOURCE_FINGERPRINT_SQL})) \
-            )"
-        )
-    } else {
-        "NOT EXISTS ( \
-            SELECT 1 FROM ks_well_ai_summaries s \
-            WHERE s.well_id = w.internal_well_id \
-              AND s.model = $2 \
-              AND s.prompt_version = $3 \
-        )"
-        .to_owned()
-    };
-
-    let selected: i64 = sqlx::query_scalar(&format!(
-        r#"
-        {CANDIDATE_ACTIVITY_SQL},
-        picked AS (
-            SELECT w.internal_well_id AS well_id,
-                   COALESCE(NULLIF(btrim(w.api14), ''), NULLIF(btrim(w.api_raw), ''), NULLIF(btrim(w.kgs_kid), '')) AS lookup_api,
-                   rw.latest_date
-            FROM recent_wells rw
-            JOIN ks_well w ON w.internal_well_id = rw.well_id
-            WHERE {IDENTITY_SQL} AND {RECENT_SPUD_SQL}
-              AND ({filter_sql})
-            ORDER BY rw.latest_date DESC, w.internal_well_id
-            LIMIT $4
-        ),
-        inserted AS (
-            INSERT INTO ks_ai_summary_run_items (run_id, well_id, lookup_api, latest_activity_date)
-            SELECT $5, well_id, lookup_api, latest_date FROM picked
-            RETURNING well_id
-        )
-        SELECT count(*)::bigint FROM inserted
-        "#,
-    ))
-    .bind(since)
-    .bind(&model)
-    .bind(PROMPT_VERSION)
-    .bind(well_limit)
-    .bind(run_id)
-    .fetch_one(&state.pool)
-    .await?;
-
-    sqlx::query("UPDATE ks_ai_summary_runs SET selected_count = $2 WHERE id = $1")
-        .bind(run_id)
-        .bind(selected as i32)
-        .execute(&state.pool)
-        .await?;
-
-    if selected == 0 {
-        sqlx::query("UPDATE ks_ai_summary_runs SET status = 'completed', finished_at = now() WHERE id = $1")
-            .bind(run_id)
-            .execute(&state.pool)
-            .await?;
-        log(
-            &state.pool,
-            run_id,
-            "info",
-            None,
-            "No eligible wells matched (all recent active wells already have a summary for this model and prompt version).",
-        )
-        .await;
-        drop(slot);
-        return load_run_json(&state.pool, run_id).await.map(Json);
-    }
-
-    log(
-        &state.pool,
-        run_id,
-        "info",
-        None,
-        &format!(
-            "Queued {selected} wells since {since} across {} endpoint(s) (model {model}, concurrency {concurrency}).",
-            endpoints.len()
-        ),
-    )
-    .await;
-
     let pool_for_task = worker_pool(&state);
     let cancel = slot.cancel.clone();
     std::mem::forget(slot);
     tokio::spawn(async move {
+        if let Err(error) = plan_changed_wells(
+            &pool_for_task,
+            run_id,
+            &model,
+            since,
+            force,
+            missing_only,
+            well_limit,
+            &cancel,
+        )
+        .await
+        {
+            finish_run_with_error(
+                &pool_for_task,
+                run_id,
+                &format!("planning changed wells: {error}"),
+            )
+            .await;
+            release_active_run();
+            return;
+        }
         let result = run_worker(
             pool_for_task.clone(),
             client,
@@ -2109,17 +2047,24 @@ async fn run_worker(
             };
             let sha = input_sha256(&input);
             if !force {
-                let exists: bool = sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM ks_well_ai_summaries \
-                     WHERE well_id = $1 AND model = $2 AND prompt_version = $3 AND input_sha256 = $4)",
+                let exists = sqlx::query_scalar::<_, bool>(
+                    "SELECT COALESCE((SELECT input_json = $4::jsonb FROM ks_well_ai_summaries \
+                 WHERE well_id = $1 AND model = $2 AND prompt_version = $3 \
+                 ORDER BY run_id DESC NULLS LAST, created_at DESC, id DESC LIMIT 1), false)",
                 )
                 .bind(well_id)
                 .bind(&producer_model)
                 .bind(PROMPT_VERSION)
-                .bind(&sha)
+                .bind(&input)
                 .fetch_one(&producer_pool)
-                .await
-                .unwrap_or(false);
+                .await;
+                let exists = match exists {
+                    Ok(exists) => exists,
+                    Err(error) => {
+                        skipped.push((well_id, format!("saved-input check failed: {error}")));
+                        continue;
+                    }
+                };
                 if exists {
                     skipped.push((well_id, "unchanged input already summarised".to_owned()));
                     continue;
@@ -2528,8 +2473,180 @@ mod tests {
         assert!(keys.contains(&"15051200010000".to_owned()));
 
         let mut map = HashMap::new();
-        map.insert("15051200010000".to_owned(), "Approved Kansas summary.".to_owned());
+        map.insert(
+            "15051200010000".to_owned(),
+            "Approved Kansas summary.".to_owned(),
+        );
         insert_summaries(&mut payload, &map);
-        assert_eq!(payload["data"]["well"]["ai_summary"], "Approved Kansas summary.");
+        assert_eq!(
+            payload["data"]["well"]["ai_summary"],
+            "Approved Kansas summary."
+        );
+    }
+}
+
+/// Plan from the exact public facts, before applying the generation budget.
+/// Runs in the background: large inventories never hold the start HTTP request open.
+/// Candidate identities are snapshotted once; fact reads use the bounded worker pool.
+#[allow(clippy::too_many_arguments)]
+async fn plan_changed_wells(
+    pool: &PgPool,
+    run_id: i64,
+    model: &str,
+    since: chrono::NaiveDate,
+    force: bool,
+    missing_only: bool,
+    limit: i64,
+    cancel: &AtomicBool,
+) -> anyhow::Result<()> {
+    let rows = sqlx::query(&format!(r#"{CANDIDATE_ACTIVITY_SQL},
+        summary_candidates AS (
+            SELECT * FROM recent_wells
+            UNION ALL
+            SELECT DISTINCT s.well_id, NULL::date AS latest_date
+            FROM ks_well_ai_summaries s
+            WHERE s.model = $2 AND s.prompt_version = $3
+              AND NOT EXISTS (SELECT 1 FROM recent_wells r WHERE r.well_id = s.well_id)
+        )
+            SELECT w.internal_well_id AS well_id,
+                   COALESCE(NULLIF(btrim(w.api14), ''), NULLIF(btrim(w.api_raw), ''), NULLIF(btrim(w.kgs_kid), '')) AS lookup_api,
+                   rw.latest_date
+            FROM summary_candidates rw
+            JOIN ks_well w ON w.internal_well_id = rw.well_id
+            WHERE {IDENTITY_SQL} AND {RECENT_SPUD_SQL}
+
+            ORDER BY rw.latest_date DESC NULLS LAST, w.internal_well_id
+            "#))
+        .bind(since)
+    .bind(model)
+    .bind(PROMPT_VERSION)
+        .fetch_all(pool)
+        .await?;
+    let mut selected = 0_i64;
+    let mut unchanged = 0_i64;
+    log(
+        pool,
+        run_id,
+        "info",
+        None,
+        "Checking public facts; only new or changed inputs will be queued.",
+    )
+    .await;
+    // Snapshot only candidate identities once. Repeating the eligibility aggregation for
+    // every page would rescan the state's production/activity inventory unnecessarily.
+    for chunk in rows.chunks(250) {
+        if selected >= limit || cancel.load(Ordering::SeqCst) {
+            break;
+        }
+        for row in chunk {
+            if selected >= limit || cancel.load(Ordering::SeqCst) {
+                break;
+            }
+            let well_id: Uuid = row.try_get("well_id")?;
+            let api: String = row.try_get("lookup_api")?;
+            let date: Option<chrono::NaiveDate> = row.try_get("latest_date")?;
+            let input = match build_input(pool, well_id, since)
+                .await
+                .map_err(|error| anyhow::anyhow!("building public facts: {error:?}"))?
+            {
+                Some(input) => input,
+                None => continue,
+            };
+            if !has_public_identity(&input) {
+                continue;
+            }
+
+            let saved: Option<bool> = sqlx::query_scalar(
+                "SELECT input_json = $4::jsonb FROM ks_well_ai_summaries \
+                 WHERE well_id = $1 AND model = $2 AND prompt_version = $3 \
+                 ORDER BY run_id DESC NULLS LAST, created_at DESC, id DESC LIMIT 1",
+            )
+            .bind(&well_id)
+            .bind(model)
+            .bind(PROMPT_VERSION)
+            .bind(&input)
+            .fetch_optional(pool)
+            .await?;
+            if !should_queue_summary(force, missing_only, saved) {
+                unchanged += 1;
+                continue;
+            }
+            // Record each item and count together so interruption remains resumable.
+            let mut tx = pool.begin().await?;
+            let inserted = sqlx::query("INSERT INTO ks_ai_summary_run_items (run_id, well_id, lookup_api, latest_activity_date) VALUES ($1, $2, $3, $4) ON CONFLICT (run_id, well_id) DO NOTHING")
+                .bind(run_id).bind(&well_id).bind(&api).bind(date).execute(&mut *tx).await?.rows_affected() as i64;
+            sqlx::query(
+                "UPDATE ks_ai_summary_runs SET selected_count = selected_count + $2 WHERE id = $1",
+            )
+            .bind(run_id)
+            .bind(inserted as i32)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            selected += inserted;
+        }
+        log(
+            pool,
+            run_id,
+            "info",
+            None,
+            &format!(
+                "Checking facts: {selected} queued, {unchanged} unchanged or already summarised."
+            ),
+        )
+        .await;
+    }
+    log(pool, run_id, "info", None, &format!("Selection complete: {selected} queued, {unchanged} unchanged or already summarised; generation limit {limit}.")).await;
+    Ok(())
+}
+
+fn should_queue_summary(force: bool, missing_only: bool, saved_matches: Option<bool>) -> bool {
+    force
+        || match saved_matches {
+            None => true,
+            Some(matches) => !missing_only && !matches,
+        }
+}
+
+#[cfg(test)]
+mod changed_selection_tests {
+    use super::*;
+
+    #[test]
+    fn unchanged_inputs_do_not_consume_the_generation_budget() {
+        let candidates = [
+            (Some(true), "unchanged"),
+            (Some(false), "changed"),
+            (None, "new"),
+        ];
+        let selected: Vec<_> = candidates
+            .into_iter()
+            .filter(|(saved, _)| should_queue_summary(false, false, *saved))
+            .take(1)
+            .collect();
+        assert_eq!(selected, vec![(Some(false), "changed")]);
+        assert!(!should_queue_summary(false, false, Some(true)));
+        assert!(should_queue_summary(false, false, None));
+        assert!(!should_queue_summary(false, true, Some(false)));
+        assert!(should_queue_summary(true, false, Some(true)));
+    }
+
+    #[test]
+    fn amended_production_and_removed_facts_change_selection() {
+        let before = json!({"well": {"well_name": "Example", "county": "Example"}, "production": {"month": "2026-09", "oil_bbl": 12}});
+        let mut after = before.clone();
+        after["production"]["oil_bbl"] = json!(13);
+        assert!(should_queue_summary(
+            false,
+            false,
+            Some(input_sha256(&before) == input_sha256(&after))
+        ));
+        after.as_object_mut().unwrap().remove("production");
+        assert!(should_queue_summary(
+            false,
+            false,
+            Some(input_sha256(&before) == input_sha256(&after))
+        ));
+        assert!(!should_queue_summary(false, false, Some(true)));
     }
 }
